@@ -1,0 +1,42 @@
+name: New-BBX-Products
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}  # allows manual "Run workflow" button too
+
+permissions:
+  contents: write  # needed to commit updated products.txt back to the repo
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run catalog scraper
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          HEADLESS: "true"
+        run: python scrape_hasbro_catalog.py
+
+      - name: Commit updated products.txt if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add products.txt hasbro_catalog.txt
+          git diff --cached --quiet || git commit -m "New-BBX-Products: update catalog [skip ci]"
+          git push
