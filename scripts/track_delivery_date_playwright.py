@@ -41,6 +41,10 @@ ERROR_LOG_FILE = SCRIPT_DIR / "errors.log"
 # Set via repo secret + workflow env in GitHub Actions; falls back to empty
 # (console-only) for local runs unless you export it yourself.
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+# Optional: your numeric Discord user ID (Developer Mode -> right-click your
+# name -> Copy User ID). If set, notifications ping you; if blank, they post
+# without a mention.
+DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
 
 # In GitHub Actions, run a single check-and-exit cycle — the workflow's cron
 # schedule provides the interval instead of an internal sleep loop. Locally
@@ -280,8 +284,19 @@ def notify(message: str) -> None:
     print(message)
     if DISCORD_WEBHOOK_URL:
         import requests
+        content = f"<@{DISCORD_USER_ID}> {message}" if DISCORD_USER_ID else message
         try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+            requests.post(
+                DISCORD_WEBHOOK_URL,
+                json={
+                    "content": content,
+                    # Explicit allow-list: without this, Discord silently
+                    # suppresses the ping/notification on some webhook and
+                    # server configurations even with a valid <@id> mention.
+                    "allowed_mentions": {"parse": ["users"]},
+                },
+                timeout=10,
+            )
         except requests.RequestException as e:
             print(f"  (failed to send Discord notification: {e})", file=sys.stderr)
 
@@ -318,7 +333,7 @@ def check_once(page, products: list[dict], state: dict) -> dict:
                     f"📦 Delivery date moved earlier for **{name}**:\n"
                     f"  was: {previous_date}\n"
                     f"  now: {current_date}\n"
-                    f"  {url} @Nytemart"
+                    f"  {url}"
                 )
 
         state[asin] = {"name": name, "date": current_date}
@@ -365,7 +380,7 @@ def main() -> None:
 
         def start_browser():
             nonlocal browser, context, page
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=True, channel="chromium")
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
