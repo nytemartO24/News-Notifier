@@ -24,6 +24,7 @@ jobs:
       - name: Run catalog scraper
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
           HEADLESS: "true"
         run: python scripts/scrape_hasbro_catalog.py
 
