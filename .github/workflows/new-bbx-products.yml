@@ -37,6 +37,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add products.txt hasbro_catalog.txt
+          git add scripts/products.txt scripts/hasbro_catalog.txt
           git diff --cached --quiet || git commit -m "New-BBX-Products: update catalog [skip ci]"
           git push
