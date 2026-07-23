@@ -31,7 +31,7 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           HEADLESS: "true"
-        run: python scrape_hasbro_catalog.py
+        run: python scripts/scrape_hasbro_catalog.py
 
       - name: Commit updated products.txt if changed
         run: |
