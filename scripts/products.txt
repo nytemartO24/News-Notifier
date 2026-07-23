@@ -98,3 +98,4 @@ B0052YDIQC  # Beyblade Thermal Laceerta W130hf Attack Bb-74
 B08D6SLYLX  # Hasbro Beyblade Speedstorm Stadium, Medium
 B07YWPTPYQ  # Beyblade Hypersphere Beystadium
 B07FM85C1H  # BEY Slingshock Beystadium Blue, 50 x 50 x 50 mm
+B07DZKP9DR  # Hasbro Beyblade Swim Trunks, Color: Blue
