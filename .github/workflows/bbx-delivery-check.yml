@@ -30,6 +30,7 @@ jobs:
       - name: Run delivery date check
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
         run: python scripts/track_delivery_date_playwright.py
 
       - name: Commit updated delivery_state.json if changed
