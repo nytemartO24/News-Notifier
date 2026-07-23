@@ -318,7 +318,7 @@ def check_once(page, products: list[dict], state: dict) -> dict:
                     f"📦 Delivery date moved earlier for **{name}**:\n"
                     f"  was: {previous_date}\n"
                     f"  now: {current_date}\n"
-                    f"  {url}"
+                    f"  {url} @Nytemart"
                 )
 
         state[asin] = {"name": name, "date": current_date}
