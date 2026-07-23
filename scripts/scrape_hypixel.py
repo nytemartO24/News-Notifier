@@ -1,5 +1,3 @@
-
-Scrape hypixel · PY
 """
 Scrapes the Hypixel forums SkyBlock Patch Notes subforum for new threads
 and posts any new ones to a Discord webhook.
