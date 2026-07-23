@@ -318,6 +318,14 @@ def check_once(page, products: list[dict], state: dict) -> dict:
             log_error(f"product {asin} ({url})", e)
             continue
 
+        if current_date.startswith("UNKNOWN"):
+            # Page layout wasn't recognized — a scraping failure, not a
+            # real state change. Leave the previous entry untouched;
+            # otherwise this blip becomes the new baseline and the next
+            # successfully-parsed date looks like it "newly appeared".
+            print(f"[warn] {asin}: {current_date} — keeping previous state", file=sys.stderr)
+            continue
+
         previous_date = state.get(asin, {}).get("date")
         if previous_date is not None and current_date != previous_date:
             old_parsed = parse_date_for_sorting(previous_date)
