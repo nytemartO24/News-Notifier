@@ -36,6 +36,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add delivery_state.json
+          git add scripts/delivery_state.json
           git diff --cached --quiet || git commit -m "BBX-Delivery-Check: update state [skip ci]"
           git push
