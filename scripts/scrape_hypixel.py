@@ -108,7 +108,7 @@ def main() -> None:
         print(f"First run — baselining {len(threads)} threads without posting.")
     else:
         for thread in reversed(new_threads):  # oldest new thread first
-            print(f"New thread: {thread['title']} ({thread['url']})")
+            print(f"New thread: {thread['title']} ({thread['url']}) @Nytemart")
             post_to_discord(thread)
  
     seen_ids.update(t["id"] for t in threads)
