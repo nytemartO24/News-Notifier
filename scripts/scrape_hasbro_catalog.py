@@ -211,7 +211,7 @@ def main() -> None:
             f.write(f"{item['asin']}  # {item['title'][:70]}\n")
 
     lines = "\n".join(f"• {item['title'][:70]} ({item['asin']})" for item in new_items)
-    notify(f"🆕 {len(new_items)} new Hasbro Beyblade X product(s) found:\n{lines}")
+    notify(f"🆕 {len(new_items)} new Hasbro Beyblade X product(s) found:\n{lines} @Nytemart")
 
 
 if __name__ == "__main__":
