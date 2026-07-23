@@ -20,12 +20,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-bbx.txt
 
       - name: Install Python dependencies
         run: pip install -r requirements-bbx.txt
 
+      - name: Cache Playwright browser binaries
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements-bbx.txt') }}
+
+      - name: Install Playwright OS dependencies
+        # Always needed: apt-installed system libs aren't cacheable, the VM
+        # is fresh every run regardless of the browser-binary cache above.
+        run: python -m playwright install-deps chromium
+
       - name: Install Playwright browser
-        run: python -m playwright install --with-deps chromium
+        # Skips the ~150MB Chromium download/extract on a cache hit;
+        # playwright itself detects the existing binary and no-ops.
+        run: python -m playwright install chromium
 
       - name: Run delivery date check
         env:
