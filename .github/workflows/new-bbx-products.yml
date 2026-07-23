@@ -2,8 +2,8 @@ name: New-BBX-Products
 
 on:
   schedule:
-    # Every 6 hours
-    - cron: "0 */6 * * *"
+    # Every  hour
+    - cron: "0 */1 * * *"
   workflow_dispatch: {}  # allows manual "Run workflow" button too
 
 permissions:
