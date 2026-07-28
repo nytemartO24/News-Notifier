@@ -28,15 +28,17 @@ shared-but-already-seeded blacklist would otherwise cause to be missed.
 That baseline scan merges its findings into the shared blacklist, silently
 (no notifications). Every later run for an already-baselined market only
 needs page 1, since results are sorted newest-first: anything there
-that's already in the shared blacklist is old news; anything not
-blacklisted is either a genuinely new arrival, or an ASIN you
-deliberately un-blacklisted by commenting out its whole line (prefix with
-'#') because you want to be told about it again. Either way it gets
-logged/notified once, then re-added to the shared blacklist so it
-doesn't repeat next run (for ANY market). New arrivals are also appended
-to that market's own products.txt, so track_delivery_multi.py picks them
-up for delivery-date tracking (prices/stock/dates still differ by
-market, even for the same ASIN).
+that's already in the shared blacklist OR already in that market's
+products.txt is old news; anything in neither is either a genuinely new
+arrival, or an ASIN you deliberately un-blacklisted by commenting out its
+whole line (prefix with '#') because you want to be told about it again.
+Either way it gets logged/notified once and appended to that market's own
+products.txt — NOT re-blacklisted. Blacklisting is reserved for "ignore
+this everywhere, including delivery tracking" (track_delivery_multi.py
+excludes blacklisted ASINs from products.txt); re-blacklisting a new
+arrival the moment it's added to products.txt would immediately stop it
+from being delivery-tracked, defeating the point. products.txt membership
+alone is enough to prevent re-notifying about the same arrival next run.
 
 Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/ — does NOT touch
@@ -303,17 +305,26 @@ def run(markets: list[str], send_discord: bool) -> None:
             )
             continue
 
-        new_items = [item for item in scraped if item["asin"] not in blacklisted_asins]
+        # "Already known" = blacklisted (ignored everywhere) OR already
+        # tracked in this market's products.txt. We deliberately do NOT
+        # blacklist new arrivals after flagging them (see module
+        # docstring) — since track_delivery_multi.py now excludes
+        # blacklisted ASINs from delivery tracking entirely, blacklisting
+        # a new arrival here would immediately stop it from being tracked,
+        # defeating the point of adding it to products.txt in the first
+        # place. products.txt membership alone is enough to prevent
+        # re-notifying about it next run.
+        already_known = blacklisted_asins | load_asin_set(products_file)
+        new_items = [item for item in scraped if item["asin"] not in already_known]
 
         if not new_items:
             logger.info(f"[{market}] No new arrivals on page 1.")
             continue
 
         logger.info(f"[{market}] Found {len(new_items)} new arrival(s):")
-        with open(BLACKLIST_FILE, "a", encoding="utf-8") as bf, open(products_file, "a", encoding="utf-8") as pf:
+        with open(products_file, "a", encoding="utf-8") as pf:
             for item in new_items:
                 logger.info(f"  {item['asin']} — {item['title'][:70]}")
-                bf.write(f"{item['asin']}  # {item['title'][:70]}\n")
                 pf.write(f"{item['asin']}  # {item['title'][:70]}\n")
 
         lines = "\n".join(f"• {item['title'][:70]} ({item['asin']})" for item in new_items)

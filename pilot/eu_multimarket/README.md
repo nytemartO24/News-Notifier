@@ -37,19 +37,27 @@ on `.de`/`.fr` too, not re-flagged separately per market:
 - **Every later run for an already-baselined market**: scans **only page
   1** — since results are sorted newest-first, that's enough to catch new
   arrivals. Anything found there that's already in `state/blacklist.txt`
-  is ignored. Anything **not** in the shared blacklist gets
-  logged/notified once, appended to that market's own `products.txt` (so
-  `track_delivery_multi.py` can track its delivery date — prices/stock/
-  dates still differ by market even for the same ASIN), and then
-  re-added to `state/blacklist.txt` so it doesn't repeat next run **for
-  any market**.
-- **To be told about a specific item again** — including one you were
-  already notified about, or one from the original baseline you
-  actually care about — comment out its **entire line** in
-  `state/blacklist.txt` (prefix with `#`, not just append a trailing
-  comment). A fully-commented line contributes no ASIN to the blacklist
-  set, so it'll show up as "new" again on the next run for whichever
-  market it's found on.
+  **or** already in that market's own `products.txt` is ignored (nothing
+  new to say about it). Anything in neither gets logged/notified once and
+  appended to that market's `products.txt` — **not** re-blacklisted (see
+  below for why).
+- **To be told about a specific item again** — including one from the
+  original baseline you actually care about — comment out its **entire
+  line** in `state/blacklist.txt` (prefix with `#`, not just append a
+  trailing comment). A fully-commented line contributes no ASIN to the
+  blacklist set, so it'll show up as "new" again on the next run for
+  whichever market it's found on.
+- **Blacklist vs. products.txt are two different concerns**:
+  `state/blacklist.txt` means "ignore this ASIN everywhere, including
+  delivery tracking" (`track_delivery_multi.py` excludes any blacklisted
+  ASIN from tracking even if it's still listed in a market's
+  `products.txt`). `products.txt` means "actively track this ASIN's
+  delivery date." A new arrival gets added to `products.txt` but is
+  deliberately **not** blacklisted — blacklisting it would immediately
+  stop it from being delivery-tracked, which would defeat the point of
+  flagging it as interesting in the first place. `products.txt`
+  membership alone is enough to stop it being re-notified as "new" next
+  run.
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
@@ -122,12 +130,20 @@ actual browser:
 HEADLESS=false python pilot/eu_multimarket/track_delivery_multi.py de
 ```
 
+If a market's `products.txt` was seeded by hand from a full catalog dump
+(e.g. copy-pasted from `hasbro_catalog.txt`) rather than built up through
+the normal new-arrival flow, expect most of those entries to now get
+excluded as blacklisted the moment you rerun the delivery tracker — that
+overlap with the baseline scan's blacklist entries is expected, not a
+bug; `load_products()` logs how many got skipped for exactly this
+reason.
+
 ## Where things land
 
 ```
 pilot/eu_multimarket/
   state/
-    blacklist.txt            # SHARED across all markets — baseline + everything already notified about
+    blacklist.txt            # SHARED across all markets — baseline scan results + anything you deliberately blacklist by hand
     <market>/
       .baseline_done          # marker: has this market had its own full scan yet
       products.txt            # new arrivals found for this market, for delivery tracking

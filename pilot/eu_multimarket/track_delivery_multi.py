@@ -8,6 +8,12 @@ marketplaces.py). Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/<market>/ — does NOT touch
 scripts/delivery_state.json or any production state.
 
+An ASIN in state/blacklist.txt (shared across all markets — see
+scrape_catalog_multi.py) is excluded from delivery tracking entirely,
+even if it's still listed in a market's products.txt — matching
+production's semantics of "blacklisted = ignore this item everywhere."
+Comment out its line in state/blacklist.txt to resume tracking it.
+
 NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for every market except "se" are
 unverified guesses (see marketplaces.py) — expect "UNKNOWN" results and
 debug_*.html dumps under state/<market>/ until those are tuned from real
@@ -45,6 +51,7 @@ from logging_setup import setup_logger
 from marketplaces import MARKETPLACES
 
 PILOT_DIR = Path(__file__).parent
+BLACKLIST_FILE = PILOT_DIR / "state" / "blacklist.txt"  # shared across all markets — see scrape_catalog_multi.py
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
@@ -109,17 +116,35 @@ def notify(message: str, send_discord: bool) -> None:
         logger.warning(f"failed to send Discord notification: {e}")
 
 
+def load_asin_set(path: Path) -> set:
+    # Same convention as scrape_catalog_multi.py: a fully-commented line
+    # (leading '#') contributes no ASIN.
+    if not path.exists():
+        return set()
+    result = set()
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        asin = line.strip().split("#")[0].strip()
+        if asin:
+            result.add(asin)
+    return result
+
+
 def load_products(market_dir: Path) -> list[dict]:
     products_file = market_dir / "products.txt"
     if not products_file.exists():
         logger.warning(f"{products_file} doesn't exist yet — run scrape_catalog_multi.py first, or create it by hand.")
         return []
 
-    products = []
-    for line in products_file.read_text(encoding="utf-8-sig").splitlines():
-        asin = line.strip().split("#")[0].strip()
-        if asin:
-            products.append(asin)
+    all_asins = list(load_asin_set(products_file))
+    blacklisted = load_asin_set(BLACKLIST_FILE)
+    products = [asin for asin in all_asins if asin not in blacklisted]
+
+    skipped = len(all_asins) - len(products)
+    if skipped:
+        logger.info(
+            f"{skipped} product(s) in {products_file} are blacklisted — excluded from delivery tracking "
+            "(comment out their line in state/blacklist.txt to track them again)."
+        )
     return products
 
 
