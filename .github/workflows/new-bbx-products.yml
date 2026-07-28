@@ -2,8 +2,9 @@ name: New-BBX-Products
 
 on:
   schedule:
-    # Every  hour
-    - cron: "0 */1 * * *"
+    # Every hour, offset from :00 — GitHub's scheduler is most congested at
+    # the top of the hour and can delay or drop cron triggers that land there.
+    - cron: "37 * * * *"
   workflow_dispatch: {}  # allows manual "Run workflow" button too
 
 permissions:
