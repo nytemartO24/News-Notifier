@@ -8,15 +8,25 @@ marketplaces.py). Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/<market>/ — does NOT touch
 scripts/delivery_state.json or any production state.
 
-NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for "de"/"fr" are unverified
-guesses (see marketplaces.py) — expect "UNKNOWN" results and
+NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for every market except "se" are
+unverified guesses (see marketplaces.py) — expect "UNKNOWN" results and
 debug_*.html dumps under state/<market>/ until those are tuned from real
 output.
+
+Logs every step per product (navigation, interstitial handling, which
+selector/signal matched, elapsed time) to logs/delivery_multi.log and the
+console — if a run looks stalled, tail that log; the timestamp on the
+last line pinpoints exactly which step it's stuck on rather than which
+product.
 
 Usage:
     python pilot/eu_multimarket/track_delivery_multi.py [market ...]
     # reads ASINs from state/<market>/products.txt (populated by
     # scrape_catalog_multi.py, or seed it by hand for a quick test)
+
+Env vars:
+    HEADLESS   "true" (default) or "false" — set false to watch the
+               browser locally while debugging a stuck/slow market
 """
 
 import argparse
@@ -37,6 +47,7 @@ from marketplaces import MARKETPLACES
 PILOT_DIR = Path(__file__).parent
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
+HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
 
 CANDIDATE_SELECTORS = [
     "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
@@ -112,58 +123,78 @@ def load_products(market_dir: Path) -> list[dict]:
     return products
 
 
-def dismiss_continue_shopping_interstitial(page) -> bool:
+def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
     try:
         if page.locator("form[action='/errors_page/validateCaptcha']").count() == 0:
             return False
+        logger.info(f"[{market}]     interstitial detected — clicking through")
         button = page.locator("form[action='/errors_page/validateCaptcha'] button[type='submit']")
         if button.count() == 0:
+            logger.info(f"[{market}]     interstitial had no submit button, giving up on it")
             return False
         button.first.click()
         page.wait_for_load_state("domcontentloaded", timeout=15000)
         page.wait_for_timeout(1500)
+        logger.info(f"[{market}]     interstitial dismissed")
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[{market}]     interstitial dismissal failed: {e}")
         return False
 
 
 def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> str:
+    logger.info(f"[{market}]   navigating to {url}")
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
     page.wait_for_timeout(2000)
 
-    for _ in range(2):
-        if not dismiss_continue_shopping_interstitial(page):
+    for attempt in range(2):
+        if not dismiss_continue_shopping_interstitial(page, market):
             break
+        logger.info(f"[{market}]   re-checking for a chained interstitial (attempt {attempt + 1}/2)")
 
+    logger.info(f"[{market}]   reading page content")
     html = page.content()
     soup = BeautifulSoup(html, "html.parser")
 
     text_blob = ""
+    matched_selector = None
     for selector in CANDIDATE_SELECTORS:
         el = soup.select_one(selector)
         if el and el.get_text(strip=True):
             text_blob = el.get_text(" ", strip=True)
+            matched_selector = selector
             break
     if not text_blob:
+        logger.info(f"[{market}]   no delivery-block selector matched — falling back to full page text")
         text_blob = soup.get_text(" ", strip=True)
+    else:
+        logger.info(f"[{market}]   delivery text found via selector {matched_selector!r}")
 
     match = date_pattern.search(text_blob)
     if match:
-        return re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+        result = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+        logger.info(f"[{market}]   date pattern matched: {result!r}")
+        return result
 
+    logger.info(f"[{market}]   no date pattern match — checking out-of-stock/no-date signal phrases")
     full_text_lower = soup.get_text(" ", strip=True).lower()
 
     for signal in config["out_of_stock_signals"]:
         if signal in full_text_lower:
+            logger.info(f"[{market}]   matched out-of-stock signal: {signal!r}")
             return "OUT OF STOCK (temporarily unavailable, no delivery date yet)"
 
     for signal in config["no_date_signals"]:
         if signal in full_text_lower:
+            logger.info(f"[{market}]   matched no-date signal: {signal!r}")
             return "NO DATE YET (listing has no confirmed delivery estimate)"
 
     debug_dir = PILOT_DIR / "state" / market
     debug_dir.mkdir(parents=True, exist_ok=True)
-    (debug_dir / f"debug_{url.rsplit('/', 1)[-1]}.html").write_text(html, encoding="utf-8")
+    debug_file = debug_dir / f"debug_{url.rsplit('/', 1)[-1]}.html"
+    debug_file.write_text(html, encoding="utf-8")
+    logger.info(f"[{market}]   no match at all — saved {debug_file}")
     return "UNKNOWN — no date found, saved debug HTML"
 
 
@@ -186,11 +217,14 @@ def check_market(market: str, send_discord: bool) -> None:
     if not asins:
         return
 
+    logger.info(f"=== [{market}] Checking {len(asins)} product(s) ===")
+
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     date_pattern = build_date_pattern(config["months"])
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel="chromium")
+        logger.info(f"[{market}] launching Chromium (headless={HEADLESS})")
+        browser = p.chromium.launch(headless=HEADLESS, channel="chromium")
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -200,21 +234,28 @@ def check_market(market: str, send_discord: bool) -> None:
         )
         page = context.new_page()
 
+        logger.info(f"[{market}] warming up: navigating to https://www.{config['domain']}/")
         try:
             page.goto(f"https://www.{config['domain']}/", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
-            dismiss_continue_shopping_interstitial(page)
+            dismiss_continue_shopping_interstitial(page, market)
+            logger.info(f"[{market}] warm-up complete")
         except Exception as e:
             logger.warning(f"[{market}] homepage warm-up failed: {e}")
 
-        for asin in asins:
+        for i, asin in enumerate(asins, start=1):
             url = f"https://www.{config['domain']}/dp/{asin}"
+            logger.info(f"[{market}] ({i}/{len(asins)}) checking {asin}")
+            start = time.monotonic()
             try:
                 current_date = fetch_delivery_date(page, url, market, config, date_pattern)
                 name = get_product_title(page)
             except Exception as e:
-                logger.warning(f"[{market}] product {asin} ({url}) failed: {e}")
+                logger.warning(f"[{market}] ({i}/{len(asins)}) {asin} failed after {time.monotonic() - start:.1f}s: {e}")
                 continue
+
+            elapsed = time.monotonic() - start
+            logger.info(f"[{market}] ({i}/{len(asins)}) {asin} = {current_date!r} ({elapsed:.1f}s)")
 
             if current_date.startswith("UNKNOWN"):
                 logger.warning(f"[{market}] {asin}: {current_date} — keeping previous state")
@@ -238,6 +279,7 @@ def check_market(market: str, send_discord: bool) -> None:
 
             state[asin] = {"name": name, "date": current_date}
 
+        logger.info(f"[{market}] closing browser")
         browser.close()
 
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
