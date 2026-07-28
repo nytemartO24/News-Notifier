@@ -17,26 +17,37 @@ sorted newest-first:
 https://www.<domain>/s?k=beyblade+x&rh=p_123%3A219753&s=date-desc-rank&dc&language=en
 ```
 
-Blacklist model (intentionally inverted from a normal allowlist):
+Blacklist model (intentionally inverted from a normal allowlist), with
+**one blacklist shared across all markets** (`state/blacklist.txt`) —
+since ASINs are the same product across Amazon's EU marketplaces, an
+item blacklisted after being seen on `.se` is recognized as already-known
+on `.de`/`.fr` too, not re-flagged separately per market:
 
-- **First run for a market** (no `state/<market>/blacklist.txt` yet):
-  scans **every page** and writes every ASIN found straight into
-  `blacklist.txt`. Nothing gets notified on this baseline pass — the
-  point is just to establish "everything that already exists" as
-  not-interesting.
-- **Every later run**: scans **only page 1** — since results are sorted
-  newest-first, that's enough to catch new arrivals. Anything found
-  there that's already in `blacklist.txt` is ignored. Anything **not**
-  in `blacklist.txt` gets logged/notified once, appended to
-  `products.txt` (so `track_delivery_multi.py` can track its delivery
-  date), and then re-added to `blacklist.txt` so it doesn't repeat next
-  run.
+- **First run for a given market** (tracked per-market via a
+  `state/<market>/.baseline_done` marker, independent of whether the
+  shared blacklist already has entries from another market): scans
+  **every page** and merges every ASIN found into `state/blacklist.txt`.
+  Nothing gets notified on this baseline pass — the point is just to
+  establish "everything that already exists" as not-interesting. Each
+  market still gets its own baseline scan even once the shared blacklist
+  exists, since one market can carry ASINs another market's catalog
+  doesn't.
+- **Every later run for an already-baselined market**: scans **only page
+  1** — since results are sorted newest-first, that's enough to catch new
+  arrivals. Anything found there that's already in `state/blacklist.txt`
+  is ignored. Anything **not** in the shared blacklist gets
+  logged/notified once, appended to that market's own `products.txt` (so
+  `track_delivery_multi.py` can track its delivery date — prices/stock/
+  dates still differ by market even for the same ASIN), and then
+  re-added to `state/blacklist.txt` so it doesn't repeat next run **for
+  any market**.
 - **To be told about a specific item again** — including one you were
   already notified about, or one from the original baseline you
   actually care about — comment out its **entire line** in
-  `blacklist.txt` (prefix with `#`, not just append a trailing comment).
-  A fully-commented line contributes no ASIN to the blacklist set, so
-  it'll show up as "new" again on the next run.
+  `state/blacklist.txt` (prefix with `#`, not just append a trailing
+  comment). A fully-commented line contributes no ASIN to the blacklist
+  set, so it'll show up as "new" again on the next run for whichever
+  market it's found on.
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
@@ -87,12 +98,14 @@ them directly).
 
 ```
 pilot/eu_multimarket/
-  state/<market>/
-    blacklist.txt          # baseline + everything already notified about
-    products.txt            # new arrivals found, for delivery tracking
-    hasbro_catalog.txt       # full scrape dump, overwritten each run
-    delivery_state.json      # last known delivery date per ASIN
-    debug_*.html              # saved on unrecognized page layouts
+  state/
+    blacklist.txt            # SHARED across all markets — baseline + everything already notified about
+    <market>/
+      .baseline_done          # marker: has this market had its own full scan yet
+      products.txt            # new arrivals found for this market, for delivery tracking
+      hasbro_catalog.txt       # full scrape dump, overwritten each run
+      delivery_state.json      # last known delivery date per ASIN, this market
+      debug_*.html              # saved on unrecognized page layouts
   logs/
     catalog_multi.log       # timestamped, mirrors console output
     delivery_multi.log
