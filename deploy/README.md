@@ -59,6 +59,32 @@ cd ~/news-notifier && git pull && ./deploy/setup.sh
 Re-running `setup.sh` is safe — it reinstalls dependencies and refreshes
 the crontab without touching your `.env`.
 
+## Monitoring — is it actually running?
+
+Each cron entry writes to its own log under `~/news-notifier/logs/`
+(`delivery.log`, `catalog.log`, `hypixel.log`), and every invocation is
+bracketed with a `=== <timestamp> START ...` / `=== <timestamp> END ...
+(exit N)` marker regardless of what the script itself prints — so a log
+with only `START`/`END` lines and no exit-code failures means it ran and
+found nothing new, not that it never ran.
+
+```bash
+tail -n 50 ~/news-notifier/logs/delivery.log   # recent runs + their output
+grep "exit 0" ~/news-notifier/logs/*.log | tail   # confirm recent runs succeeded
+grep -v "exit 0" ~/news-notifier/logs/*.log | grep END   # any non-zero exits
+```
+
+To confirm cron itself is firing at all (separate question from whether
+the script succeeded — a missing `START` line for an expected tick means
+cron never launched it):
+
+```bash
+grep CRON /var/log/syslog | tail -20
+```
+
+Logs are rotated weekly (4 weeks kept, compressed) via
+`/etc/logrotate.d/news-notifier`, installed automatically by `setup.sh`.
+
 ## Adjusting the schedule
 
 Edit `deploy/crontab.txt` (the `__APP_DIR__` placeholder gets substituted

@@ -52,6 +52,9 @@ echo "==> Installing crontab (replacing any previous news-notifier entries)"
   sed "s#__APP_DIR__#$APP_DIR#g" deploy/crontab.txt
 } | crontab -
 
+echo "==> Installing log rotation"
+sed "s#/home/\\*/news-notifier#$APP_DIR#g" deploy/logrotate.conf | sudo tee /etc/logrotate.d/news-notifier > /dev/null
+
 cat <<EOF
 
 Done.
@@ -60,4 +63,5 @@ Next steps:
   1. Edit $APP_DIR/.env with your real Discord webhook URL / user ID.
   2. Check the installed schedule with: crontab -l
   3. Tail a log after the next tick, e.g.: tail -f $APP_DIR/logs/delivery.log
+  4. Confirm cron itself is firing: grep CRON /var/log/syslog | tail
 EOF
