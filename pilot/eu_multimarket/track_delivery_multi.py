@@ -5,14 +5,17 @@ LOCAL PILOT — EU multi-marketplace delivery-date tracker.
 Extends scripts/track_delivery_date_playwright.py with per-marketplace
 locale handling (month names, "no date"/"out of stock" phrasing — see
 marketplaces.py). Standalone pilot: reads/writes only under
-pilot/eu_multimarket/state/<market>/ — does NOT touch
-scripts/delivery_state.json or any production state.
+pilot/eu_multimarket/state/ — does NOT touch scripts/delivery_state.json
+or any production state.
 
-An ASIN in state/blacklist.txt (shared across all markets — see
-scrape_catalog_multi.py) is excluded from delivery tracking entirely,
-even if it's still listed in a market's products.txt — matching
-production's semantics of "blacklisted = ignore this item everywhere."
-Comment out its line in state/blacklist.txt to resume tracking it.
+There is one global, cross-market product list (state/products.txt) and
+one global blacklist (state/blacklist.txt) — see scrape_catalog_multi.py.
+Since ASINs are the same product across Amazon's EU marketplaces, this
+script computes ONE set of "tracked" ASINs (products.txt minus
+blacklist.txt) and checks EVERY one of them on EVERY requested market's
+domain, regardless of which market(s) it was originally discovered on.
+Comment out an ASIN's whole line in state/blacklist.txt to resume
+tracking it everywhere.
 
 NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for every market except "se" are
 unverified guesses (see marketplaces.py) — expect "UNKNOWN" results and
@@ -27,8 +30,10 @@ product.
 
 Usage:
     python pilot/eu_multimarket/track_delivery_multi.py [market ...]
-    # reads ASINs from state/<market>/products.txt (populated by
-    # scrape_catalog_multi.py, or seed it by hand for a quick test)
+    # reads ASINs from state/products.txt (populated by
+    # scrape_catalog_multi.py, or seed it by hand for a quick test),
+    # minus whatever's currently in state/blacklist.txt, and checks that
+    # same list against every named market
 
 Env vars:
     HEADLESS   "true" (default) or "false" — set false to watch the
@@ -52,6 +57,7 @@ from marketplaces import MARKETPLACES
 
 PILOT_DIR = Path(__file__).parent
 BLACKLIST_FILE = PILOT_DIR / "state" / "blacklist.txt"  # shared across all markets — see scrape_catalog_multi.py
+PRODUCTS_FILE = PILOT_DIR / "state" / "products.txt"  # shared across all markets — see scrape_catalog_multi.py
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
@@ -129,23 +135,23 @@ def load_asin_set(path: Path) -> set:
     return result
 
 
-def load_products(market_dir: Path) -> list[dict]:
-    products_file = market_dir / "products.txt"
-    if not products_file.exists():
-        logger.warning(f"{products_file} doesn't exist yet — run scrape_catalog_multi.py first, or create it by hand.")
+def load_tracked_asins() -> list[str]:
+    """The one global list of ASINs to check, on every market: everything
+    in the shared products.txt minus everything currently blacklisted."""
+    if not PRODUCTS_FILE.exists():
+        logger.warning(f"{PRODUCTS_FILE} doesn't exist yet — run scrape_catalog_multi.py first, or create it by hand.")
         return []
 
-    all_asins = list(load_asin_set(products_file))
+    all_asins = load_asin_set(PRODUCTS_FILE)
     blacklisted = load_asin_set(BLACKLIST_FILE)
-    products = [asin for asin in all_asins if asin not in blacklisted]
+    tracked = sorted(all_asins - blacklisted)
 
-    skipped = len(all_asins) - len(products)
-    if skipped:
-        logger.info(
-            f"{skipped} product(s) in {products_file} are blacklisted — excluded from delivery tracking "
-            "(comment out their line in state/blacklist.txt to track them again)."
-        )
-    return products
+    skipped = len(all_asins) - len(tracked)
+    logger.info(
+        f"{len(tracked)} product(s) tracked ({skipped} blacklisted, excluded — comment out their line in "
+        "state/blacklist.txt to track them again)."
+    )
+    return tracked
 
 
 def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
@@ -232,13 +238,12 @@ def truncate_name(name: str) -> str:
     return name if len(name) <= MAX_NAME_LENGTH else name[: MAX_NAME_LENGTH - 1].rstrip() + "…"
 
 
-def check_market(market: str, send_discord: bool) -> None:
+def check_market(market: str, asins: list[str], send_discord: bool) -> None:
     config = MARKETPLACES[market]
     market_dir = PILOT_DIR / "state" / market
     market_dir.mkdir(parents=True, exist_ok=True)
     state_file = market_dir / "delivery_state.json"
 
-    asins = load_products(market_dir)
     if not asins:
         return
 
@@ -331,11 +336,15 @@ if __name__ == "__main__":
 
     logger.info(f"=== START delivery_multi markets={args.markets} ===")
     try:
-        for market in args.markets:
-            if market not in MARKETPLACES:
-                logger.error(f"Unknown market '{market}' — choices are {list(MARKETPLACES)}")
-                continue
-            check_market(market, args.send_discord)
+        tracked_asins = load_tracked_asins()
+        if not tracked_asins:
+            logger.info("Nothing to track — exiting.")
+        else:
+            for market in args.markets:
+                if market not in MARKETPLACES:
+                    logger.error(f"Unknown market '{market}' — choices are {list(MARKETPLACES)}")
+                    continue
+                check_market(market, tracked_asins, args.send_discord)
         logger.info("=== END delivery_multi (exit 0) ===")
     except Exception:
         logger.exception("=== END delivery_multi (exit 1) ===")
