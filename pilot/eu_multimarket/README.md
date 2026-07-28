@@ -111,6 +111,17 @@ real notifications, using the same `DISCORD_WEBHOOK_URL` /
 `DISCORD_USER_ID` env vars as production (source your `.env`, or export
 them directly).
 
+`track_delivery_multi.py` logs every step per product — navigation,
+interstitial handling, which selector/signal matched, elapsed time — so
+a run that looks stuck isn't a black box: `tail -f
+logs/delivery_multi.log` shows exactly which market/ASIN/step it's on.
+If a market genuinely seems to hang, set `HEADLESS=false` to watch the
+actual browser:
+
+```bash
+HEADLESS=false python pilot/eu_multimarket/track_delivery_multi.py de
+```
+
 ## Where things land
 
 ```
