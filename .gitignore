@@ -2,3 +2,6 @@ debug_*.html
 errors.log
 __pycache__/
 *.pyc
+.env
+.venv/
+logs/

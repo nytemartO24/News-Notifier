@@ -1,10 +1,11 @@
 name: BBX-Delivery-Check
 
 on:
-  schedule:
-    # Every hour, offset from :00 — GitHub's scheduler is most congested at
-    # the top of the hour and can delay or drop cron triggers that land there.
-    - cron: "7 * * * *"
+  # Scheduling moved to VPS cron (see deploy/) — GitHub Actions' scheduler
+  # was unreliable well below the 30-min cadence this needs. Kept as a
+  # manual fallback only; do NOT re-add a schedule: trigger here without
+  # also disabling the VPS cron job, or you'll get duplicate Discord
+  # notifications and diverging state between the two.
   workflow_dispatch: {}  # allows manual "Run workflow" button too
 
 permissions:
