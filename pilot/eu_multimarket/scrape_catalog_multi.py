@@ -13,20 +13,33 @@ shared across the EU marketplaces' unified catalog, unlike the
 name-based p_89 filter this pilot used before. "language=en" asks for
 English page text even on non-English domains.)
 
-Blacklist model (deliberately inverted from a normal allowlist): a fresh
-run with no blacklist.txt yet does a FULL scan across every page and
-seeds blacklist.txt with every ASIN found — nothing gets notified on
-this baseline pass. Every later run only needs page 1, since results are
-sorted newest-first: anything there that's already in blacklist.txt is
-old news; anything not blacklisted is either a genuinely new arrival, or
-an ASIN you deliberately un-blacklisted by commenting out its whole line
-(prefix with '#') because you want to be told about it again. Either way
-it gets logged/notified once, then re-added to blacklist.txt so it
-doesn't repeat next run. New arrivals are also appended to products.txt,
-so track_delivery_multi.py picks them up for delivery-date tracking.
+Blacklist model (deliberately inverted from a normal allowlist): the
+blacklist is a SINGLE FILE SHARED ACROSS ALL MARKETS
+(state/blacklist.txt), since ASINs are the same product across Amazon's
+EU marketplaces — a product blacklisted after being seen on .se is
+recognized as already-known on .de/.fr too, not re-flagged per market.
+
+Each market still gets its own one-time FULL scan across every page the
+first time it's run (tracked per-market via a
+state/<market>/.baseline_done marker, independent of whether the shared
+blacklist already exists from another market's run) — this matters
+because a market can carry ASINs no other market's catalog has, which a
+shared-but-already-seeded blacklist would otherwise cause to be missed.
+That baseline scan merges its findings into the shared blacklist, silently
+(no notifications). Every later run for an already-baselined market only
+needs page 1, since results are sorted newest-first: anything there
+that's already in the shared blacklist is old news; anything not
+blacklisted is either a genuinely new arrival, or an ASIN you
+deliberately un-blacklisted by commenting out its whole line (prefix with
+'#') because you want to be told about it again. Either way it gets
+logged/notified once, then re-added to the shared blacklist so it
+doesn't repeat next run (for ANY market). New arrivals are also appended
+to that market's own products.txt, so track_delivery_multi.py picks them
+up for delivery-date tracking (prices/stock/dates still differ by
+market, even for the same ASIN).
 
 Standalone pilot: reads/writes only under
-pilot/eu_multimarket/state/<market>/ — does NOT touch
+pilot/eu_multimarket/state/ — does NOT touch
 scripts/products.txt, blacklist.txt, or any production state.
 
 Setup:
@@ -57,6 +70,8 @@ from logging_setup import setup_logger
 from marketplaces import MARKETPLACES
 
 PILOT_DIR = Path(__file__).parent
+STATE_DIR = PILOT_DIR / "state"
+BLACKLIST_FILE = STATE_DIR / "blacklist.txt"  # shared across all markets — see module docstring
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
@@ -228,21 +243,38 @@ def scrape_marketplace(market: str, full_scan: bool) -> list[dict]:
     return deduped
 
 
+def seed_blacklist_header_if_new() -> None:
+    if BLACKLIST_FILE.exists():
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    BLACKLIST_FILE.write_text(
+        "# Shared across ALL markets — an ASIN here is ignored on every\n"
+        "# marketplace, not just the one it was first seen on. To be alerted\n"
+        "# about a specific item again, comment out its WHOLE line (prefix with\n"
+        "# '#') — it'll then be treated as not-blacklisted on the next run,\n"
+        "# flagged once, and automatically re-added here so it doesn't repeat.\n\n"
+    )
+
+
 def run(markets: list[str], send_discord: bool) -> None:
+    seed_blacklist_header_if_new()
+
     for market in markets:
         if market not in MARKETPLACES:
             logger.error(f"Unknown market '{market}' — choices are {list(MARKETPLACES)}")
             continue
 
-        market_dir = PILOT_DIR / "state" / market
+        market_dir = STATE_DIR / market
         market_dir.mkdir(parents=True, exist_ok=True)
-        blacklist_file = market_dir / "blacklist.txt"
         products_file = market_dir / "products.txt"
         catalog_log_file = market_dir / "hasbro_catalog.txt"
+        baseline_marker = market_dir / ".baseline_done"
 
-        full_scan = not blacklist_file.exists()
+        # Per-market, independent of whether the shared blacklist already
+        # exists from another market's run — see module docstring.
+        full_scan = not baseline_marker.exists()
         if full_scan:
-            logger.info(f"[{market}] No blacklist.txt yet — doing a full initial scan to seed it.")
+            logger.info(f"[{market}] No baseline yet for this market — doing a full initial scan.")
 
         logger.info(f"=== [{market}] scraping {MARKETPLACES[market]['domain']} ===")
         scraped = scrape_marketplace(market, full_scan=full_scan)
@@ -253,24 +285,24 @@ def run(markets: list[str], send_discord: bool) -> None:
             for item in scraped:
                 f.write(f"{item['asin']}  # {item['title'][:70]}\n")
 
+        blacklisted_asins = load_asin_set(BLACKLIST_FILE)
+
         if full_scan:
-            with open(blacklist_file, "w", encoding="utf-8") as f:
-                f.write(
-                    "# Auto-generated baseline — every Hasbro Beyblade X ASIN found during\n"
-                    "# the initial full-catalog scan. To be alerted about a specific item\n"
-                    "# again, comment out its WHOLE line (prefix with '#') — it'll then be\n"
-                    "# treated as not-blacklisted on the next run, flagged once, and\n"
-                    "# automatically re-added here so it doesn't repeat after that.\n\n"
-                )
-                for item in scraped:
+            # Merge into the shared blacklist rather than overwriting it —
+            # another market may have already seeded it with overlapping
+            # (shared-catalog) ASINs.
+            new_to_blacklist = [item for item in scraped if item["asin"] not in blacklisted_asins]
+            with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
+                for item in new_to_blacklist:
                     f.write(f"{item['asin']}  # {item['title'][:70]}\n")
+            baseline_marker.touch()
             logger.info(
-                f"[{market}] Seeded blacklist.txt with {len(scraped)} ASIN(s) — "
-                "no notifications on this baseline pass."
+                f"[{market}] Baseline scan complete — added {len(new_to_blacklist)} new ASIN(s) to the "
+                f"shared blacklist ({len(scraped) - len(new_to_blacklist)} already there from another "
+                "market). No notifications on this baseline pass."
             )
             continue
 
-        blacklisted_asins = load_asin_set(blacklist_file)
         new_items = [item for item in scraped if item["asin"] not in blacklisted_asins]
 
         if not new_items:
@@ -278,7 +310,7 @@ def run(markets: list[str], send_discord: bool) -> None:
             continue
 
         logger.info(f"[{market}] Found {len(new_items)} new arrival(s):")
-        with open(blacklist_file, "a", encoding="utf-8") as bf, open(products_file, "a", encoding="utf-8") as pf:
+        with open(BLACKLIST_FILE, "a", encoding="utf-8") as bf, open(products_file, "a", encoding="utf-8") as pf:
             for item in new_items:
                 logger.info(f"  {item['asin']} — {item['title'][:70]}")
                 bf.write(f"{item['asin']}  # {item['title'][:70]}\n")
