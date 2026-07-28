@@ -8,6 +8,36 @@ the VPS cron, and nothing here touches `scripts/` or its state files.**
 Covers `se` (existing production locale, known-good baseline), `de`, and
 `fr` — see `marketplaces.py` for the per-market config.
 
+## How catalog discovery works
+
+`scrape_catalog_multi.py` searches Hasbro's brand catalog directly,
+sorted newest-first:
+
+```
+https://www.<domain>/s?k=beyblade+x&rh=p_123%3A219753&s=date-desc-rank&dc&language=en
+```
+
+Blacklist model (intentionally inverted from a normal allowlist):
+
+- **First run for a market** (no `state/<market>/blacklist.txt` yet):
+  scans **every page** and writes every ASIN found straight into
+  `blacklist.txt`. Nothing gets notified on this baseline pass — the
+  point is just to establish "everything that already exists" as
+  not-interesting.
+- **Every later run**: scans **only page 1** — since results are sorted
+  newest-first, that's enough to catch new arrivals. Anything found
+  there that's already in `blacklist.txt` is ignored. Anything **not**
+  in `blacklist.txt` gets logged/notified once, appended to
+  `products.txt` (so `track_delivery_multi.py` can track its delivery
+  date), and then re-added to `blacklist.txt` so it doesn't repeat next
+  run.
+- **To be told about a specific item again** — including one you were
+  already notified about, or one from the original baseline you
+  actually care about — comment out its **entire line** in
+  `blacklist.txt` (prefix with `#`, not just append a trailing comment).
+  A fully-commented line contributes no ASIN to the blacklist set, so
+  it'll show up as "new" again on the next run.
+
 ## Known unknowns (why this is a pilot and not a rollout)
 
 - `de`/`fr` `no_date_signals` and `out_of_stock_signals` in
@@ -15,12 +45,18 @@ Covers `se` (existing production locale, known-good baseline), `de`, and
   Amazon.de/.fr pages. Expect `UNKNOWN` results and
   `state/<market>/debug_*.html` dumps on first runs — read those dumps
   and correct the phrase lists to match what's actually on the page.
-- The `p_89:Hasbro` brand-filter refinement ID is copied from the `.se`
-  search URL and **unverified** on `.de`/`.fr` — if the search page comes
-  back with zero or clearly-wrong results, drop `rh=` from the search URL
-  in `scrape_catalog_multi.py` and filter by title text instead.
+- `p_123:219753` (Hasbro's brand id) is believed constant across the EU
+  unified catalog, but hasn't been independently confirmed on every
+  marketplace here — if a market's results look wrong or empty, check
+  that first.
 - Date parsing (`build_date_pattern`) assumes German/French dates look
   like `21. Januar 2027` / `21 janvier 2027` — verify against real pages.
+- Since the search URL forces `language=en`, it's worth checking whether
+  the same trick works on product pages too (`/dp/<asin>?language=en`) —
+  if so, the delivery tracker could drop its per-locale phrase/month
+  guessing entirely and just reuse the English signal lists everywhere.
+  Not done yet; flagging it as the most promising simplification if the
+  guessed `de`/`fr` phrasing above turns out unreliable.
 
 ## Setup
 
@@ -52,10 +88,11 @@ them directly).
 ```
 pilot/eu_multimarket/
   state/<market>/
-    products.txt          # discovered ASINs for that market
-    hasbro_catalog.txt     # full scrape dump, overwritten each run
-    delivery_state.json    # last known delivery date per ASIN
-    debug_*.html           # saved on unrecognized page layouts
+    blacklist.txt          # baseline + everything already notified about
+    products.txt            # new arrivals found, for delivery tracking
+    hasbro_catalog.txt       # full scrape dump, overwritten each run
+    delivery_state.json      # last known delivery date per ASIN
+    debug_*.html              # saved on unrecognized page layouts
   logs/
     catalog_multi.log       # timestamped, mirrors console output
     delivery_multi.log
@@ -67,12 +104,13 @@ distinguishable from a run that never happened.
 
 ## Next steps once this looks solid
 
-- Correct the `de`/`fr` phrase lists and brand filter based on real
-  output.
+- Correct the `de`/`fr` phrase lists based on real output; confirm the
+  brand id actually returns Hasbro-only results on each market.
 - Decide whether to fold these into the production scripts (parameterize
   `scripts/scrape_hasbro_catalog.py` /
-  `scripts/track_delivery_date_playwright.py` by marketplace) or keep
-  them as a separate pipeline.
+  `scripts/track_delivery_date_playwright.py` by marketplace, and
+  consider adopting the same blacklist-seeding + page-1-only approach
+  there) or keep them as a separate pipeline.
 - Only then consider adding markets to the VPS crontab, and at a lower
   frequency than the .se jobs given the added per-marketplace bot-block
   risk discussed when this was scoped.

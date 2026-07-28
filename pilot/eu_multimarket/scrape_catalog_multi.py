@@ -3,10 +3,31 @@
 LOCAL PILOT — EU multi-marketplace Beyblade X catalog scraper.
 
 Extends scripts/scrape_hasbro_catalog.py to loop over multiple Amazon EU
-marketplaces (see marketplaces.py) instead of just amazon.se. Standalone
-pilot: reads/writes only under pilot/eu_multimarket/state/<market>/ —
-does NOT touch scripts/products.txt, blacklist.txt, or any production
-state. Run manually (no cron) while validating locale handling.
+marketplaces (see marketplaces.py) instead of just amazon.se, using a
+Hasbro-brand, newest-first search:
+
+    https://www.<domain>/s?k=beyblade+x&rh=p_123%3A219753&s=date-desc-rank&dc&language=en
+
+("p_123:219753" is Amazon's brand-catalog id for Hasbro — a numeric id
+shared across the EU marketplaces' unified catalog, unlike the
+name-based p_89 filter this pilot used before. "language=en" asks for
+English page text even on non-English domains.)
+
+Blacklist model (deliberately inverted from a normal allowlist): a fresh
+run with no blacklist.txt yet does a FULL scan across every page and
+seeds blacklist.txt with every ASIN found — nothing gets notified on
+this baseline pass. Every later run only needs page 1, since results are
+sorted newest-first: anything there that's already in blacklist.txt is
+old news; anything not blacklisted is either a genuinely new arrival, or
+an ASIN you deliberately un-blacklisted by commenting out its whole line
+(prefix with '#') because you want to be told about it again. Either way
+it gets logged/notified once, then re-added to blacklist.txt so it
+doesn't repeat next run. New arrivals are also appended to products.txt,
+so track_delivery_multi.py picks them up for delivery-date tracking.
+
+Standalone pilot: reads/writes only under
+pilot/eu_multimarket/state/<market>/ — does NOT touch
+scripts/products.txt, blacklist.txt, or any production state.
 
 Setup:
     pip install -r pilot/eu_multimarket/requirements.txt
@@ -27,7 +48,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -40,7 +60,13 @@ PILOT_DIR = Path(__file__).parent
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
-MAX_PAGES = 10
+MAX_PAGES = 10  # safety cap for the initial full-catalog scan only
+
+# Hasbro's brand-catalog id — believed constant across the EU unified
+# catalog, but not independently confirmed on every marketplace here.
+SEARCH_URL_TEMPLATE = (
+    "https://www.{domain}/s?k=beyblade+x&rh=p_123%3A219753&s=date-desc-rank&dc&language=en"
+)
 
 logger = setup_logger("catalog_multi")
 
@@ -67,6 +93,10 @@ def notify(message: str, send_discord: bool) -> None:
 
 
 def load_asin_set(path: Path) -> set:
+    # A line whose whole content is commented out (starts with '#') has
+    # nothing before the first '#', so it contributes no ASIN here — that's
+    # exactly how you "un-blacklist" an item: prefix its entire line with
+    # '#' and it drops out of this set.
     if not path.exists():
         return set()
     result = set()
@@ -135,10 +165,9 @@ def go_to_next_page(page) -> None:
     page.wait_for_timeout(2000)
 
 
-def scrape_marketplace(market: str) -> list[dict]:
+def scrape_marketplace(market: str, full_scan: bool) -> list[dict]:
     config = MARKETPLACES[market]
-    base_url = f"https://www.{config['domain']}/s"
-    search_url = f"{base_url}?{urlencode({'k': 'beyblade x', 'rh': config['brand_filter']})}"
+    search_url = SEARCH_URL_TEMPLATE.format(domain=config["domain"])
     all_results = []
 
     with sync_playwright() as p:
@@ -162,21 +191,30 @@ def scrape_marketplace(market: str) -> list[dict]:
             if not dismiss_continue_shopping_interstitial(page):
                 break
 
-        for page_num in range(1, MAX_PAGES + 1):
+        max_pages = MAX_PAGES if full_scan else 1
+        hit_cap = full_scan  # only meaningful (and only warned about) for a full scan
+        for page_num in range(1, max_pages + 1):
             logger.info(f"[{market}] Scraping page {page_num}...")
             page_results = scrape_page(page)
             logger.info(f"[{market}]   found {len(page_results)} product(s) on this page")
             all_results.extend(page_results)
 
+            if not full_scan:
+                logger.info(f"[{market}]   page-1-only mode (newest-first sort) — done.")
+                hit_cap = False
+                break
+
             if not has_next_page(page):
                 logger.info(f"[{market}]   no further pages.")
+                hit_cap = False
                 break
 
             go_to_next_page(page)
             for _ in range(2):
                 if not dismiss_continue_shopping_interstitial(page):
                     break
-        else:
+
+        if hit_cap:
             logger.warning(f"[{market}] Hit MAX_PAGES={MAX_PAGES} safety cap — there may be more results.")
 
         browser.close()
@@ -198,34 +236,57 @@ def run(markets: list[str], send_discord: bool) -> None:
 
         market_dir = PILOT_DIR / "state" / market
         market_dir.mkdir(parents=True, exist_ok=True)
+        blacklist_file = market_dir / "blacklist.txt"
         products_file = market_dir / "products.txt"
         catalog_log_file = market_dir / "hasbro_catalog.txt"
 
+        full_scan = not blacklist_file.exists()
+        if full_scan:
+            logger.info(f"[{market}] No blacklist.txt yet — doing a full initial scan to seed it.")
+
         logger.info(f"=== [{market}] scraping {MARKETPLACES[market]['domain']} ===")
-        scraped = scrape_marketplace(market)
-        logger.info(f"[{market}] Total unique products scraped: {len(scraped)}")
+        scraped = scrape_marketplace(market, full_scan=full_scan)
+        logger.info(f"[{market}] Total unique products scraped this run: {len(scraped)}")
 
         with open(catalog_log_file, "w", encoding="utf-8") as f:
             f.write(f"# Scraped {time.strftime('%Y-%m-%d %H:%M:%S')} — {len(scraped)} unique ASINs\n\n")
             for item in scraped:
                 f.write(f"{item['asin']}  # {item['title'][:70]}\n")
 
-        known_asins = load_asin_set(products_file)
-        new_items = [item for item in scraped if item["asin"] not in known_asins]
-
-        if not new_items:
-            logger.info(f"[{market}] No new products found.")
+        if full_scan:
+            with open(blacklist_file, "w", encoding="utf-8") as f:
+                f.write(
+                    "# Auto-generated baseline — every Hasbro Beyblade X ASIN found during\n"
+                    "# the initial full-catalog scan. To be alerted about a specific item\n"
+                    "# again, comment out its WHOLE line (prefix with '#') — it'll then be\n"
+                    "# treated as not-blacklisted on the next run, flagged once, and\n"
+                    "# automatically re-added here so it doesn't repeat after that.\n\n"
+                )
+                for item in scraped:
+                    f.write(f"{item['asin']}  # {item['title'][:70]}\n")
+            logger.info(
+                f"[{market}] Seeded blacklist.txt with {len(scraped)} ASIN(s) — "
+                "no notifications on this baseline pass."
+            )
             continue
 
-        logger.info(f"[{market}] Found {len(new_items)} new product(s):")
-        with open(products_file, "a", encoding="utf-8") as f:
+        blacklisted_asins = load_asin_set(blacklist_file)
+        new_items = [item for item in scraped if item["asin"] not in blacklisted_asins]
+
+        if not new_items:
+            logger.info(f"[{market}] No new arrivals on page 1.")
+            continue
+
+        logger.info(f"[{market}] Found {len(new_items)} new arrival(s):")
+        with open(blacklist_file, "a", encoding="utf-8") as bf, open(products_file, "a", encoding="utf-8") as pf:
             for item in new_items:
                 logger.info(f"  {item['asin']} — {item['title'][:70]}")
-                f.write(f"{item['asin']}  # {item['title'][:70]}\n")
+                bf.write(f"{item['asin']}  # {item['title'][:70]}\n")
+                pf.write(f"{item['asin']}  # {item['title'][:70]}\n")
 
         lines = "\n".join(f"• {item['title'][:70]} ({item['asin']})" for item in new_items)
         notify(
-            f"🆕 [{market.upper()}] {len(new_items)} new Hasbro Beyblade X product(s) found:\n{lines}",
+            f"🆕 [{market.upper()}] {len(new_items)} new Hasbro Beyblade X arrival(s):\n{lines}",
             send_discord,
         )
 
