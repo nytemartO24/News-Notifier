@@ -25,6 +25,12 @@ state/<market>/.baseline_done marker, independent of whether the shared
 blacklist already exists from another market's run) — this matters
 because a market can carry ASINs no other market's catalog has, which a
 shared-but-already-seeded blacklist would otherwise cause to be missed.
+Whether an ASIN needs adding to the blacklist during a baseline scan is
+decided against EVERY line ever recorded for it (commented or not), not
+just currently-active ones — otherwise a later market's baseline scan
+would see a deliberately-un-blacklisted (commented-out) ASIN as "not yet
+blacklisted" and silently add a duplicate active line for it, undoing
+the un-blacklisting.
 
 That baseline scan seeds BOTH the shared blacklist AND that market's own
 products.txt with everything found, silently (no notifications) —
@@ -65,6 +71,7 @@ Env vars:
 
 import argparse
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -114,6 +121,9 @@ def notify(message: str, send_discord: bool) -> None:
         logger.warning(f"failed to send Discord notification: {e}")
 
 
+ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$")
+
+
 def load_asin_set(path: Path) -> set:
     # A line whose whole content is commented out (starts with '#') has
     # nothing before the first '#', so it contributes no ASIN here — that's
@@ -125,6 +135,28 @@ def load_asin_set(path: Path) -> set:
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         asin = line.strip().split("#")[0].strip()
         if asin:
+            result.add(asin)
+    return result
+
+
+def load_recorded_asin_set(path: Path) -> set:
+    # Every ASIN that has EVER had a line written for it, whether it's
+    # currently active or deliberately commented out. Used specifically
+    # to decide whether to append a new blacklist line during a baseline
+    # scan — checking only load_asin_set() (active-only) would treat an
+    # ASIN someone deliberately un-blacklisted as "not yet blacklisted"
+    # and silently re-add a duplicate active line for it the next time
+    # any market's baseline scan finds that same (shared-catalog) ASIN,
+    # undoing the un-blacklisting.
+    if not path.exists():
+        return set()
+    result = set()
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            stripped = stripped[1:].strip()
+        asin = stripped.split("#")[0].strip()
+        if asin and ASIN_PATTERN.match(asin):
             result.add(asin)
     return result
 
@@ -302,7 +334,15 @@ def run(markets: list[str], send_discord: bool) -> None:
             # line out of blacklist.txt then does exactly what it's meant
             # to: it's still in products.txt, so it resumes being
             # delivery-tracked, without needing a separate re-seed step.
-            new_to_blacklist = [item for item in scraped if item["asin"] not in blacklisted_asins]
+            #
+            # Checked against EVERY recorded ASIN (commented or not), not
+            # just the currently-active blacklist — otherwise an ASIN
+            # someone deliberately un-blacklisted looks "not yet
+            # blacklisted" to a later market's baseline scan (since ASINs
+            # are shared across the EU catalog) and gets a duplicate
+            # active line silently re-added, undoing the un-blacklisting.
+            recorded_asins = load_recorded_asin_set(BLACKLIST_FILE)
+            new_to_blacklist = [item for item in scraped if item["asin"] not in recorded_asins]
             with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
                 for item in new_to_blacklist:
                     f.write(f"{item['asin']}  # {item['title'][:70]}\n")
@@ -316,9 +356,9 @@ def run(markets: list[str], send_discord: bool) -> None:
             baseline_marker.touch()
             logger.info(
                 f"[{market}] Baseline scan complete — added {len(new_to_blacklist)} new ASIN(s) to the "
-                f"shared blacklist ({len(scraped) - len(new_to_blacklist)} already there from another "
-                f"market) and {len(new_to_products)} to this market's products.txt. No notifications on "
-                "this baseline pass."
+                f"shared blacklist ({len(scraped) - len(new_to_blacklist)} already recorded there — from "
+                f"another market's baseline, or deliberately un-blacklisted and left alone) and "
+                f"{len(new_to_products)} to this market's products.txt. No notifications on this baseline pass."
             )
             continue
 
