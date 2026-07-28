@@ -15,4 +15,14 @@ set +a
 # interval instead. The other two scripts always run once regardless.
 export RUN_ONCE=true
 
-exec "$REPO_ROOT/.venv/bin/python" "$1"
+# Bracket every invocation with markers so the log shows a run happened
+# even when the script itself prints nothing (e.g. scrape_hypixel.py stays
+# silent when there's nothing new) — otherwise a quiet log is
+# indistinguishable from cron never firing at all.
+echo "=== $(date -Is) START $1 ==="
+set +e
+"$REPO_ROOT/.venv/bin/python" "$1"
+status=$?
+set -e
+echo "=== $(date -Is) END $1 (exit $status) ==="
+exit "$status"

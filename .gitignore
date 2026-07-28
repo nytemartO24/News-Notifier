@@ -5,3 +5,5 @@ __pycache__/
 .env
 .venv/
 logs/
+pilot/eu_multimarket/state/
+pilot/eu_multimarket/logs/
