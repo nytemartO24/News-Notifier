@@ -1,0 +1,11 @@
+# news-notifier scheduled scrapers — installed by deploy/setup.sh.
+# __APP_DIR__ is substituted with the real clone path during install.
+#
+# Staggered across each 30-minute window so the two Playwright-based jobs
+# don't spin up Chromium at the same moment on a small VPS, and none of
+# them land on :00/:30 exactly (avoids thundering-herd-style contention
+# some cron-adjacent schedulers hit at round times — not a real concern on
+# a single dedicated box, but harmless to keep spread out regardless).
+0,30 * * * * __APP_DIR__/deploy/run.sh scripts/track_delivery_date_playwright.py >> __APP_DIR__/logs/delivery.log 2>&1
+10,40 * * * * __APP_DIR__/deploy/run.sh scripts/scrape_hasbro_catalog.py >> __APP_DIR__/logs/catalog.log 2>&1
+20,50 * * * * __APP_DIR__/deploy/run.sh scripts/scrape_hypixel.py >> __APP_DIR__/logs/hypixel.log 2>&1
