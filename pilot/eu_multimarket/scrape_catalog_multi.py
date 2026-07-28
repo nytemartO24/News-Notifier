@@ -49,7 +49,7 @@ Setup:
 Usage:
     python pilot/eu_multimarket/scrape_catalog_multi.py [market ...]
     # e.g. python pilot/eu_multimarket/scrape_catalog_multi.py de fr
-    # defaults to all configured markets (se, de, fr) if none given
+    # defaults to all configured markets (see marketplaces.py) if none given
 
 Env vars:
     DISCORD_WEBHOOK_URL / DISCORD_USER_ID   only used with --send-discord
