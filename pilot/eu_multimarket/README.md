@@ -28,36 +28,34 @@ on `.de`/`.fr` too, not re-flagged separately per market:
 - **First run for a given market** (tracked per-market via a
   `state/<market>/.baseline_done` marker, independent of whether the
   shared blacklist already has entries from another market): scans
-  **every page** and merges every ASIN found into `state/blacklist.txt`.
-  Nothing gets notified on this baseline pass — the point is just to
-  establish "everything that already exists" as not-interesting. Each
-  market still gets its own baseline scan even once the shared blacklist
-  exists, since one market can carry ASINs another market's catalog
-  doesn't.
-- **Every later run for an already-baselined market**: scans **only page
-  1** — since results are sorted newest-first, that's enough to catch new
-  arrivals. Anything found there that's already in `state/blacklist.txt`
-  **or** already in that market's own `products.txt` is ignored (nothing
-  new to say about it). Anything in neither gets logged/notified once and
-  appended to that market's `products.txt` — **not** re-blacklisted (see
-  below for why).
-- **To be told about a specific item again** — including one from the
-  original baseline you actually care about — comment out its **entire
-  line** in `state/blacklist.txt` (prefix with `#`, not just append a
-  trailing comment). A fully-commented line contributes no ASIN to the
-  blacklist set, so it'll show up as "new" again on the next run for
-  whichever market it's found on.
+  **every page** and seeds BOTH `state/blacklist.txt` AND that market's
+  own `products.txt` with every ASIN found — mirroring production, where
+  `blacklist.txt` started life as a literal copy of `products.txt`.
+  Nothing gets notified on this baseline pass. Each market still gets its
+  own baseline scan even once the shared blacklist exists, since one
+  market can carry ASINs another market's catalog doesn't.
 - **Blacklist vs. products.txt are two different concerns**:
   `state/blacklist.txt` means "ignore this ASIN everywhere, including
   delivery tracking" (`track_delivery_multi.py` excludes any blacklisted
   ASIN from tracking even if it's still listed in a market's
-  `products.txt`). `products.txt` means "actively track this ASIN's
-  delivery date." A new arrival gets added to `products.txt` but is
-  deliberately **not** blacklisted — blacklisting it would immediately
-  stop it from being delivery-tracked, which would defeat the point of
-  flagging it as interesting in the first place. `products.txt`
-  membership alone is enough to stop it being re-notified as "new" next
-  run.
+  `products.txt`). `products.txt` means "this ASIN is known/trackable."
+  Seeding both during the baseline is what makes the next point work.
+- **To resume tracking a specific item** — including one from the
+  original baseline — comment out its **entire line** in
+  `state/blacklist.txt` (prefix with `#`, not just append a trailing
+  comment; a fully-commented line contributes no ASIN to the blacklist
+  set). Since it's already in `products.txt` from the baseline, it
+  silently resumes being delivery-tracked on the next `track_delivery_multi.py`
+  run — no re-notification, since it isn't "new," just no-longer-excluded.
+- **Every later catalog run for an already-baselined market**: scans
+  **only page 1** — since results are sorted newest-first, that's enough
+  to catch genuinely new arrivals. Anything found there that's already in
+  the shared blacklist or that market's `products.txt` is old news.
+  Anything in neither is a real new arrival — that gets logged/notified
+  once and appended to `products.txt`, deliberately **not** blacklisted
+  (blacklisting it would immediately stop it from being delivery-tracked,
+  defeating the point) — `products.txt` membership alone is enough to
+  stop it being re-notified as "new" again.
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
@@ -137,6 +135,22 @@ excluded as blacklisted the moment you rerun the delivery tracker — that
 overlap with the baseline scan's blacklist entries is expected, not a
 bug; `load_products()` logs how many got skipped for exactly this
 reason.
+
+**If a market was already baselined before this fix** (its
+`.baseline_done` marker already exists), its `products.txt` won't get
+backfilled automatically — the baseline-seeds-both-files behavior only
+applies the first time a market is scanned. To retroactively get the
+"comment out of blacklist.txt to resume tracking" behavior working for
+an already-baselined market, delete its marker and rerun the catalog
+scraper for just that market:
+
+```bash
+rm pilot/eu_multimarket/state/<market>/.baseline_done
+python pilot/eu_multimarket/scrape_catalog_multi.py <market>
+```
+
+This redoes the full all-pages scan and merges everything into both
+files (it won't duplicate what's already there, or re-notify anything).
 
 ## Where things land
 

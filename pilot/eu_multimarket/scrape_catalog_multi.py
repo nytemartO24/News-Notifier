@@ -25,20 +25,25 @@ state/<market>/.baseline_done marker, independent of whether the shared
 blacklist already exists from another market's run) — this matters
 because a market can carry ASINs no other market's catalog has, which a
 shared-but-already-seeded blacklist would otherwise cause to be missed.
-That baseline scan merges its findings into the shared blacklist, silently
-(no notifications). Every later run for an already-baselined market only
-needs page 1, since results are sorted newest-first: anything there
-that's already in the shared blacklist OR already in that market's
-products.txt is old news; anything in neither is either a genuinely new
-arrival, or an ASIN you deliberately un-blacklisted by commenting out its
-whole line (prefix with '#') because you want to be told about it again.
-Either way it gets logged/notified once and appended to that market's own
-products.txt — NOT re-blacklisted. Blacklisting is reserved for "ignore
-this everywhere, including delivery tracking" (track_delivery_multi.py
-excludes blacklisted ASINs from products.txt); re-blacklisting a new
-arrival the moment it's added to products.txt would immediately stop it
-from being delivery-tracked, defeating the point. products.txt membership
-alone is enough to prevent re-notifying about the same arrival next run.
+
+That baseline scan seeds BOTH the shared blacklist AND that market's own
+products.txt with everything found, silently (no notifications) —
+mirroring production, where blacklist.txt started as a literal copy of
+products.txt. This matters: it's what makes "un-blacklist an item to
+resume tracking it" actually work. Since track_delivery_multi.py excludes
+any blacklisted ASIN from delivery tracking even when it's listed in
+products.txt (see that file), commenting an item's whole line out of
+state/blacklist.txt (prefix with '#') puts it back into the trackable
+set — silently, no notification, since it was already known — because it
+never left products.txt in the first place.
+
+Every later run for an already-baselined market only needs page 1, since
+results are sorted newest-first: anything there that's already in either
+the shared blacklist or that market's products.txt is old news. Anything
+in neither is a genuinely new arrival (never seen in any baseline or
+prior run) — that gets logged/notified once and appended to products.txt,
+deliberately NOT blacklisted, so it's immediately trackable and won't be
+re-notified as "new" again (products.txt membership alone prevents that).
 
 Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/ — does NOT touch
@@ -290,18 +295,30 @@ def run(markets: list[str], send_discord: bool) -> None:
         blacklisted_asins = load_asin_set(BLACKLIST_FILE)
 
         if full_scan:
-            # Merge into the shared blacklist rather than overwriting it —
-            # another market may have already seeded it with overlapping
-            # (shared-catalog) ASINs.
+            # Seed BOTH files with everything found — mirrors production,
+            # where blacklist.txt started as a literal copy of the full
+            # products.txt. products.txt makes every item trackable;
+            # blacklist.txt excludes it by default. Commenting an item's
+            # line out of blacklist.txt then does exactly what it's meant
+            # to: it's still in products.txt, so it resumes being
+            # delivery-tracked, without needing a separate re-seed step.
             new_to_blacklist = [item for item in scraped if item["asin"] not in blacklisted_asins]
             with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
                 for item in new_to_blacklist:
                     f.write(f"{item['asin']}  # {item['title'][:70]}\n")
+
+            known_products = load_asin_set(products_file)
+            new_to_products = [item for item in scraped if item["asin"] not in known_products]
+            with open(products_file, "a", encoding="utf-8") as f:
+                for item in new_to_products:
+                    f.write(f"{item['asin']}  # {item['title'][:70]}\n")
+
             baseline_marker.touch()
             logger.info(
                 f"[{market}] Baseline scan complete — added {len(new_to_blacklist)} new ASIN(s) to the "
                 f"shared blacklist ({len(scraped) - len(new_to_blacklist)} already there from another "
-                "market). No notifications on this baseline pass."
+                f"market) and {len(new_to_products)} to this market's products.txt. No notifications on "
+                "this baseline pass."
             )
             continue
 
