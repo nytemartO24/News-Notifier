@@ -10,6 +10,29 @@ on shipping-cost grounds): `se` (existing production locale, known-good
 baseline), `de`, `fr`, `es`, `nl`, `be`, `it`, `pl` — see
 `marketplaces.py` for the per-market config.
 
+## The core model: everything is global except delivery state
+
+There is **one shared product list and one shared blacklist for all
+markets combined** — `state/products.txt` and `state/blacklist.txt`.
+There is deliberately **no per-market products.txt anymore.** ASINs are
+the same product across Amazon's EU marketplaces, so "is this ASIN
+trackable" is a single yes/no question, not one answer per market.
+
+- `state/products.txt` = every ASIN ever discovered, on any market.
+- `state/blacklist.txt` = which of those to ignore (not notify about,
+  not delivery-track) — same file whether it was first seen on `.se` or
+  `.pl`.
+- **Tracked set** = `products.txt` minus `blacklist.txt`. Every ASIN in
+  that set gets checked on **every market you run**
+  (`track_delivery_multi.py se de fr ...`), regardless of which market it
+  was originally discovered on. If a product is genuinely unavailable on
+  a given domain, that's a real, useful "no listing" or error result —
+  not a reason to skip checking it there.
+- Only `delivery_state.json` (last known date) and `debug_*.html` dumps
+  stay per-market under `state/<market>/`, since the same ASIN can
+  legitimately have a different delivery date, or none at all, per
+  country.
+
 ## How catalog discovery works
 
 `scrape_catalog_multi.py` searches Hasbro's brand catalog directly,
@@ -19,43 +42,36 @@ sorted newest-first:
 https://www.<domain>/s?k=beyblade+x&rh=p_123%3A219753&s=date-desc-rank&dc&language=en
 ```
 
-Blacklist model (intentionally inverted from a normal allowlist), with
-**one blacklist shared across all markets** (`state/blacklist.txt`) —
-since ASINs are the same product across Amazon's EU marketplaces, an
-item blacklisted after being seen on `.se` is recognized as already-known
-on `.de`/`.fr` too, not re-flagged separately per market:
-
 - **First run for a given market** (tracked per-market via a
-  `state/<market>/.baseline_done` marker, independent of whether the
-  shared blacklist already has entries from another market): scans
-  **every page** and seeds BOTH `state/blacklist.txt` AND that market's
-  own `products.txt` with every ASIN found — mirroring production, where
+  `state/<market>/.baseline_done` marker): scans **every page** and seeds
+  BOTH shared files with every ASIN found — mirroring production, where
   `blacklist.txt` started life as a literal copy of `products.txt`.
-  Nothing gets notified on this baseline pass. Each market still gets its
-  own baseline scan even once the shared blacklist exists, since one
-  market can carry ASINs another market's catalog doesn't.
-- **Blacklist vs. products.txt are two different concerns**:
-  `state/blacklist.txt` means "ignore this ASIN everywhere, including
-  delivery tracking" (`track_delivery_multi.py` excludes any blacklisted
-  ASIN from tracking even if it's still listed in a market's
-  `products.txt`). `products.txt` means "this ASIN is known/trackable."
-  Seeding both during the baseline is what makes the next point work.
-- **To resume tracking a specific item** — including one from the
-  original baseline — comment out its **entire line** in
-  `state/blacklist.txt` (prefix with `#`, not just append a trailing
-  comment; a fully-commented line contributes no ASIN to the blacklist
-  set). Since it's already in `products.txt` from the baseline, it
-  silently resumes being delivery-tracked on the next `track_delivery_multi.py`
-  run — no re-notification, since it isn't "new," just no-longer-excluded.
+  Nothing gets notified on this baseline pass. Every market still gets
+  its own baseline scan even once the shared files have entries from
+  another market, since one market's search results can surface ASINs
+  another market's search hasn't (yet).
+- **To resume tracking a specific item** — including one from a
+  baseline — comment out its **entire line** in `state/blacklist.txt`
+  (prefix with `#`, not just a trailing comment; a fully-commented line
+  contributes no ASIN to the blacklist set). Since it's already in the
+  shared `products.txt`, it silently resumes being delivery-tracked **on
+  every market you run** next time — no re-notification, since it isn't
+  "new," just no-longer-excluded.
 - **Every later catalog run for an already-baselined market**: scans
   **only page 1** — since results are sorted newest-first, that's enough
   to catch genuinely new arrivals. Anything found there that's already in
-  the shared blacklist or that market's `products.txt` is old news.
-  Anything in neither is a real new arrival — that gets logged/notified
-  once and appended to `products.txt`, deliberately **not** blacklisted
-  (blacklisting it would immediately stop it from being delivery-tracked,
-  defeating the point) — `products.txt` membership alone is enough to
-  stop it being re-notified as "new" again.
+  either shared file is old news. Anything in neither is a real new
+  arrival — logged/notified once and appended to the shared
+  `products.txt`, deliberately **not** blacklisted (blacklisting it would
+  immediately stop it from being delivery-tracked, defeating the point).
+- Whether an ASIN needs adding to the blacklist during a baseline scan is
+  decided against **every line ever recorded for it, commented or not**
+  — not just currently-active ones. Checking only active entries would
+  mean a later market's baseline scan sees a deliberately-un-blacklisted
+  ASIN as "not yet blacklisted" and silently re-adds a duplicate active
+  line for it, undoing the un-blacklisting. (This bit us once already —
+  if you're cleaning up an old `blacklist.txt` from before this existed,
+  check for an ASIN appearing on more than one line.)
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
@@ -98,8 +114,10 @@ python -m playwright install chromium
 python pilot/eu_multimarket/scrape_catalog_multi.py
 python pilot/eu_multimarket/scrape_catalog_multi.py es it   # just these two
 
-# Delivery-date check — reads state/<market>/products.txt written above
-python pilot/eu_multimarket/track_delivery_multi.py es it
+# Delivery-date check — checks the SAME global tracked-ASIN list
+# (state/products.txt minus state/blacklist.txt) against every market
+# you list here
+python pilot/eu_multimarket/track_delivery_multi.py se de fr es nl be it pl
 ```
 
 Running with no market arguments does a **full baseline scan of every
@@ -128,29 +146,28 @@ actual browser:
 HEADLESS=false python pilot/eu_multimarket/track_delivery_multi.py de
 ```
 
-If a market's `products.txt` was seeded by hand from a full catalog dump
-(e.g. copy-pasted from `hasbro_catalog.txt`) rather than built up through
-the normal new-arrival flow, expect most of those entries to now get
-excluded as blacklisted the moment you rerun the delivery tracker — that
-overlap with the baseline scan's blacklist entries is expected, not a
-bug; `load_products()` logs how many got skipped for exactly this
-reason.
+## Migrating from the old per-market products.txt
 
-**If a market was already baselined before this fix** (its
-`.baseline_done` marker already exists), its `products.txt` won't get
-backfilled automatically — the baseline-seeds-both-files behavior only
-applies the first time a market is scanned. To retroactively get the
-"comment out of blacklist.txt to resume tracking" behavior working for
-an already-baselined market, delete its marker and rerun the catalog
-scraper for just that market:
+If you were running an earlier version of this pilot, you'll have
+leftover `state/<market>/products.txt` files that are no longer read by
+anything — `track_delivery_multi.py` now only reads the single
+`state/products.txt`. Consolidate them once:
 
 ```bash
-rm pilot/eu_multimarket/state/<market>/.baseline_done
-python pilot/eu_multimarket/scrape_catalog_multi.py <market>
+cd pilot/eu_multimarket/state
+cat */products.txt 2>/dev/null | sort -u -t'#' -k1,1 > /tmp/merged_products.txt
+cat /tmp/merged_products.txt products.txt 2>/dev/null | sort -u -t'#' -k1,1 > products.txt.new
+mv products.txt.new products.txt
+rm */products.txt
 ```
 
-This redoes the full all-pages scan and merges everything into both
-files (it won't duplicate what's already there, or re-notify anything).
+That merges every market's old list plus whatever's already in the new
+shared file, deduplicated by ASIN, then removes the now-unused per-market
+copies. Check `products.txt` afterward — you'll likely want to trim it
+down rather than track everything that was ever in any market's old
+list; anything you don't want tracked, blacklist it (or just delete its
+line from `products.txt` entirely, which works too — it's a plain
+membership list, not a comment-toggle file like `blacklist.txt`).
 
 ## Where things land
 
@@ -158,10 +175,10 @@ files (it won't duplicate what's already there, or re-notify anything).
 pilot/eu_multimarket/
   state/
     blacklist.txt            # SHARED across all markets — baseline scan results + anything you deliberately blacklist by hand
+    products.txt              # SHARED across all markets — every trackable ASIN
     <market>/
       .baseline_done          # marker: has this market had its own full scan yet
-      products.txt            # new arrivals found for this market, for delivery tracking
-      hasbro_catalog.txt       # full scrape dump, overwritten each run
+      hasbro_catalog.txt       # full scrape dump for this market, overwritten each run
       delivery_state.json      # last known delivery date per ASIN, this market
       debug_*.html              # saved on unrecognized page layouts
   logs/
@@ -180,8 +197,8 @@ distinguishable from a run that never happened.
 - Decide whether to fold these into the production scripts (parameterize
   `scripts/scrape_hasbro_catalog.py` /
   `scripts/track_delivery_date_playwright.py` by marketplace, and
-  consider adopting the same blacklist-seeding + page-1-only approach
-  there) or keep them as a separate pipeline.
+  consider adopting the same global-list + page-1-only approach there)
+  or keep them as a separate pipeline.
 - Only then consider adding markets to the VPS crontab, and at a lower
   frequency than the .se jobs given the added per-marketplace bot-block
   risk discussed when this was scoped.
