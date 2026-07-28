@@ -5,8 +5,10 @@ before deciding whether/how to roll it into the production scripts or
 the VPS. **Run this on your own machine, manually — it is not wired into
 the VPS cron, and nothing here touches `scripts/` or its state files.**
 
-Covers `se` (existing production locale, known-good baseline), `de`, and
-`fr` — see `marketplaces.py` for the per-market config.
+Covers every EU Amazon marketplace except the UK and Ireland (excluded
+on shipping-cost grounds): `se` (existing production locale, known-good
+baseline), `de`, `fr`, `es`, `nl`, `be`, `it`, `pl` — see
+`marketplaces.py` for the per-market config.
 
 ## How catalog discovery works
 
@@ -51,23 +53,29 @@ on `.de`/`.fr` too, not re-flagged separately per market:
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
-- `de`/`fr` `no_date_signals` and `out_of_stock_signals` in
-  `marketplaces.py` are **guessed** phrasings, not confirmed against real
-  Amazon.de/.fr pages. Expect `UNKNOWN` results and
-  `state/<market>/debug_*.html` dumps on first runs — read those dumps
-  and correct the phrase lists to match what's actually on the page.
+- Every market except `se`'s `no_date_signals` and `out_of_stock_signals`
+  in `marketplaces.py` are **guessed** phrasings translated from the
+  English list, not confirmed against real Amazon pages in that locale.
+  Expect `UNKNOWN` results and `state/<market>/debug_*.html` dumps on
+  first runs — read those dumps and correct the phrase lists to match
+  what's actually on the page.
+- Belgium (`be`) is bilingual (Dutch/French) but only has the Dutch
+  phrase list so far — if French-language listings show up as
+  `UNKNOWN`, that's why; add French phrases to `marketplaces["be"]`
+  once you see it happen.
 - `p_123:219753` (Hasbro's brand id) is believed constant across the EU
   unified catalog, but hasn't been independently confirmed on every
   marketplace here — if a market's results look wrong or empty, check
   that first.
-- Date parsing (`build_date_pattern`) assumes German/French dates look
-  like `21. Januar 2027` / `21 janvier 2027` — verify against real pages.
+- Date parsing (`build_date_pattern`) assumes each locale's dates look
+  like `21. Januar 2027` / `21 janvier 2027` / etc. — verify against
+  real pages per market.
 - Since the search URL forces `language=en`, it's worth checking whether
   the same trick works on product pages too (`/dp/<asin>?language=en`) —
   if so, the delivery tracker could drop its per-locale phrase/month
   guessing entirely and just reuse the English signal lists everywhere.
-  Not done yet; flagging it as the most promising simplification if the
-  guessed `de`/`fr` phrasing above turns out unreliable.
+  Not done yet; flagging it as the most promising simplification given
+  how many locales' phrasing is now just a guess.
 
 ## Setup
 
@@ -79,13 +87,22 @@ python -m playwright install chromium
 ## Usage
 
 ```bash
-# Catalog discovery — defaults to all configured markets (se, de, fr)
+# Catalog discovery — defaults to ALL configured markets (se, de, fr,
+# es, nl, be, it, pl) if you don't list any
 python pilot/eu_multimarket/scrape_catalog_multi.py
-python pilot/eu_multimarket/scrape_catalog_multi.py de fr   # just these two
+python pilot/eu_multimarket/scrape_catalog_multi.py es it   # just these two
 
 # Delivery-date check — reads state/<market>/products.txt written above
-python pilot/eu_multimarket/track_delivery_multi.py de fr
+python pilot/eu_multimarket/track_delivery_multi.py es it
 ```
+
+Running with no market arguments does a **full baseline scan of every
+market that doesn't have one yet, in one go** — expect that first
+combined run to take noticeably longer (8 markets × up to 10 pages each)
+and to hit Amazon from your IP across every one of its EU properties in
+a short window. Consider running markets a few at a time the first time
+instead of all 8 at once, especially since several of these phrase lists
+are unverified and might need a debug/tune cycle per market anyway.
 
 Both scripts **default to a Discord dry-run** — they log what they would
 send instead of actually posting, so pilot noise doesn't hit your real
@@ -117,7 +134,7 @@ distinguishable from a run that never happened.
 
 ## Next steps once this looks solid
 
-- Correct the `de`/`fr` phrase lists based on real output; confirm the
+- Correct each market's phrase lists based on real output; confirm the
   brand id actually returns Hasbro-only results on each market.
 - Decide whether to fold these into the production scripts (parameterize
   `scripts/scrape_hasbro_catalog.py` /
