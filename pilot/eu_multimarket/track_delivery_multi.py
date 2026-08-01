@@ -70,31 +70,21 @@ CANDIDATE_SELECTORS = [
     "#mir-layout-DELIVERY_BLOCK",
 ]
 
-# UNVERIFIED — best-guess buybox selectors for "Dispatches from" / "Sold
-# by" info, not confirmed against real pages on any market here. Amazon's
-# buybox layout varies (classic #merchant-info vs newer tabular-buybox);
-# tune against real output the same way the delivery-date selectors were.
-SELLER_SELECTORS = [
+# Confirmed against real product-page HTML (both an Amazon-sold and a
+# third-party-sold listing): #merchantInfoFeature_feature_div always
+# holds the actual seller name — "Amazon" when Amazon ships+sells
+# ("Shipper / Seller" label), or the third-party name when it doesn't
+# ("Sold by" label, e.g. "Skydigital"), regardless of which label wording
+# is shown. This replaced an earlier set of guessed selectors
+# (#merchant-info, #tabular-buybox, etc.) that don't exist in Amazon's
+# actual current markup at all — the fallbacks below are kept only in
+# case a market/layout genuinely differs; they remain unverified.
+SELLER_CONTAINER_SELECTOR = "#merchantInfoFeature_feature_div"
+SELLER_FALLBACK_SELECTORS = [
     "#merchant-info",
     "#tabular-buybox",
     "#aod-offer-soldBy",
     "#usedBuyBoxOOS",
-]
-
-# UNVERIFIED — best-guess "sold by <seller>" phrasing per locale, used to
-# find the SPECIFIC seller name rather than just checking whether "amazon"
-# appears anywhere in the block. That distinction matters: a third-party
-# listing dispatched by Amazon but sold by someone else often still reads
-# "Dispatches from Amazon / Sold by Skydigital" — checking for "amazon"
-# anywhere in that block would wrongly call it Amazon-sold.
-SOLD_BY_PATTERNS = [
-    r"sold by\s*[:\-]?\s*([^.\n]+)",           # en
-    r"verkauft von\s*[:\-]?\s*([^.\n]+)",       # de
-    r"vendu(?:e)? par\s*[:\-]?\s*([^.\n]+)",     # fr
-    r"vendido por\s*[:\-]?\s*([^.\n]+)",          # es
-    r"venduto da\s*[:\-]?\s*([^.\n]+)",            # it
-    r"verkocht door\s*[:\-]?\s*([^.\n]+)",          # nl / be
-    r"sprzedawca[:\-]?\s*([^.\n]+)",                 # pl
 ]
 
 MAX_NAME_LENGTH = 40
@@ -200,7 +190,18 @@ def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
 
 
 def fetch_seller_info(soup) -> str:
-    for selector in SELLER_SELECTORS:
+    container = soup.select_one(SELLER_CONTAINER_SELECTOR)
+    if container:
+        # The container repeats the seller name multiple times (visible
+        # link, hidden popover-trigger link, popover body) — the first
+        # ".offer-display-feature-text-message" match is the clean name
+        # ("Amazon" / "Skydigital") without that repetition.
+        name_el = container.select_one(".offer-display-feature-text-message")
+        text = name_el.get_text(strip=True) if name_el else container.get_text(" ", strip=True)
+        if text:
+            return text
+
+    for selector in SELLER_FALLBACK_SELECTORS:
         el = soup.select_one(selector)
         if el and el.get_text(strip=True):
             return el.get_text(" ", strip=True)
@@ -208,24 +209,15 @@ def fetch_seller_info(soup) -> str:
 
 
 def is_amazon_seller(seller_text: str):
-    """True/False/None (unknown, no seller block found at all).
-    Looks specifically for the "sold by <name>" portion via
-    SOLD_BY_PATTERNS and checks whether THAT name mentions Amazon — not
-    whether "amazon" appears anywhere in the block, since a third-party
-    listing dispatched by Amazon often still says "Dispatches from
-    Amazon / Sold by Skydigital", which mentions Amazon without being
-    Amazon-sold. Falls back to a whole-block check only if no "sold by"
-    label in any known language is found. UNVERIFIED against real pages
-    — tune this (and SELLER_SELECTORS/SOLD_BY_PATTERNS) if it starts
-    misclassifying."""
+    """True/False/None (unknown, no seller block found at all). Since
+    seller_text comes from the seller-specific container (or its clean
+    name span), a plain "amazon" substring check is safe here — unlike
+    checking the whole page or a shipping/fulfillment block, this text
+    never mentions Amazon for reasons other than being the actual
+    seller."""
     if not seller_text:
         return None
-    text_lower = seller_text.lower()
-    for pattern in SOLD_BY_PATTERNS:
-        m = re.search(pattern, text_lower, re.IGNORECASE)
-        if m:
-            return "amazon" in m.group(1)
-    return "amazon" in text_lower
+    return "amazon" in seller_text.lower()
 
 
 def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
