@@ -235,18 +235,26 @@ def fetch_delivery_date(page, url: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
 
     text_blob = ""
+    matched_selector = None
     for selector in CANDIDATE_SELECTORS:
         el = soup.select_one(selector)
         if el and el.get_text(strip=True):
             text_blob = el.get_text(" ", strip=True)
+            matched_selector = selector
             break
 
-    if not text_blob:
-        text_blob = soup.get_text(" ", strip=True)
-
-    match = DATE_PATTERN.search(text_blob)
-    if match:
-        return re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+    if matched_selector:
+        match = DATE_PATTERN.search(text_blob)
+        if match:
+            return re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+    # else: deliberately skip the date-pattern search against the full
+    # page text — it's too promiscuous, matching unrelated dates anywhere
+    # on the page (review timestamps, editorial content, etc). A date
+    # found this way could just as easily be a review's "Reviewed in
+    # Spain on 21 January 2026" as a real delivery estimate, and since it
+    # carries an explicit year, the this-date-already-passed correction
+    # in parse_date_for_sorting() never kicks in for it — a stale,
+    # unrelated date would sail through looking like a real one.
 
     full_text_lower = soup.get_text(" ", strip=True).lower()
 
