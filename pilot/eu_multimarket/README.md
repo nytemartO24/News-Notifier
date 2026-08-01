@@ -57,16 +57,13 @@ an example line and exits — edit it and rerun.
 - Date parsing (`build_date_pattern`) assumes each locale's dates look
   like `21. Januar 2027` / `21 janvier 2027` / etc. — verify against
   real pages per market.
-- Seller detection (`SELLER_SELECTORS`, `SOLD_BY_PATTERNS`) is a
-  best-guess at Amazon's buybox structure and per-locale "sold by"
-  phrasing, **not confirmed against any real page yet** — this couldn't
-  be tested from the environment that wrote it (network access to
-  Amazon is blocked there). If a listing you know is Amazon-sold shows
-  up flagged `⚠️ NOT AMAZON` (or vice versa), check
-  `state/<market>/debug_*.html` isn't the only place seller info would
-  show up — that file only gets saved when the delivery date itself
-  can't be found, not on a seller misclassification — and tune
-  `SELLER_SELECTORS`/`SOLD_BY_PATTERNS` from real page HTML instead.
+- Seller detection targets `#merchantInfoFeature_feature_div`, confirmed
+  directly against real HTML from both an Amazon-sold listing and a
+  third-party one (Skydigital) — it consistently holds the actual seller
+  name regardless of label wording ("Shipper / Seller" for Amazon vs.
+  "Sold by" for third parties). `SELLER_FALLBACK_SELECTORS` (the earlier
+  guesses: `#merchant-info`, `#tabular-buybox`, etc.) are kept only in
+  case some market's layout genuinely differs — those remain unverified.
 
 ## Setup
 
