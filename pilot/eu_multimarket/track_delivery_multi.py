@@ -196,19 +196,28 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
             text_blob = el.get_text(" ", strip=True)
             matched_selector = selector
             break
-    if not text_blob:
-        logger.info(f"[{market}]   no delivery-block selector matched — falling back to full page text")
-        text_blob = soup.get_text(" ", strip=True)
-    else:
+
+    if matched_selector:
         logger.info(f"[{market}]   delivery text found via selector {matched_selector!r}")
+        match = date_pattern.search(text_blob)
+        if match:
+            result = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+            logger.info(f"[{market}]   date pattern matched: {result!r}")
+            return result
+    else:
+        # No known delivery-block selector matched. Deliberately do NOT
+        # run the date pattern against the full page text here — it's too
+        # promiscuous, matching unrelated dates anywhere on the page
+        # (review timestamps, editorial content, etc). A "21 January
+        # 2026" found this way could just as easily be a review's
+        # "Reviewed in Spain on 21 January 2026" as an actual delivery
+        # estimate, and since it carries an explicit year, the
+        # this-date-already-passed-so-assume-next-year correction in
+        # parse_date_for_sorting() never kicks in for it — a stale,
+        # unrelated date would sail through looking like a real one.
+        logger.info(f"[{market}]   no delivery-block selector matched — skipping date-pattern search entirely")
 
-    match = date_pattern.search(text_blob)
-    if match:
-        result = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
-        logger.info(f"[{market}]   date pattern matched: {result!r}")
-        return result
-
-    logger.info(f"[{market}]   no date pattern match — checking out-of-stock/no-date signal phrases")
+    logger.info(f"[{market}]   checking out-of-stock/no-date signal phrases")
     full_text_lower = soup.get_text(" ", strip=True).lower()
 
     for signal in config["out_of_stock_signals"]:
