@@ -18,6 +18,7 @@ Usage:
     python track_delivery_date_playwright.py
 """
 
+import datetime
 import json
 import os
 import re
@@ -122,8 +123,6 @@ def parse_date_for_sorting(date_str: str):
     """Best-effort parse of our extracted date string into a sortable date.
     Returns None for non-date states (NO DATE YET / UNKNOWN) so those can be
     pushed to the end of the sorted table."""
-    import datetime
-
     m = re.search(r"(\d{1,2})\s+([a-zA-ZåäöÅÄÖ]+)\.?,?\s*(\d{4})?", date_str)
     if not m:
         return None
@@ -317,6 +316,19 @@ def truncate_name(name: str) -> str:
 
 
 def check_once(page, products: list[dict], state: dict) -> dict:
+    # A real delivery estimate can never legitimately be in the past — so
+    # any stored date that's already passed is evidence of past
+    # corruption (e.g. the full-page-text date-regex false positives this
+    # replaced), not a value worth protecting via "keep previous state on
+    # UNKNOWN." Discard it so a genuinely unavailable date reads as
+    # missing rather than as a stale, misleading one.
+    today = datetime.date.today()
+    for asin in list(state.keys()):
+        parsed = parse_date_for_sorting(state[asin].get("date", ""))
+        if parsed is not None and parsed < today:
+            print(f"[warn] discarding stale state for {asin}: {state[asin]['date']!r} is in the past", file=sys.stderr)
+            del state[asin]
+
     for product in products:
         asin, url = product["asin"], product["url"]
         try:

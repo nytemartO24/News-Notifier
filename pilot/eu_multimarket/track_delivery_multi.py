@@ -41,6 +41,7 @@ Env vars:
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -80,8 +81,6 @@ def build_date_pattern(months: dict) -> re.Pattern:
 
 
 def parse_date_for_sorting(date_str: str, months: dict):
-    import datetime
-
     m = re.search(r"(\d{1,2})\.?\s+([^\s\d]+)\.?,?\s*(\d{4})?", date_str)
     if not m:
         return None
@@ -260,6 +259,19 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
 
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     date_pattern = build_date_pattern(config["months"])
+
+    # A real delivery estimate can never legitimately be in the past — so
+    # any stored date that's already passed is evidence of past
+    # corruption (e.g. the full-page-text date-regex false positives this
+    # replaced), not a value worth protecting via "keep previous state on
+    # UNKNOWN." Discard it so a genuinely unavailable date reads as
+    # missing rather than as a stale, misleading one.
+    today = datetime.date.today()
+    for asin in list(state.keys()):
+        parsed = parse_date_for_sorting(state[asin].get("date", ""), config["months"])
+        if parsed is not None and parsed < today:
+            logger.warning(f"[{market}] discarding stale state for {asin}: {state[asin]['date']!r} is in the past")
+            del state[asin]
 
     with sync_playwright() as p:
         logger.info(f"[{market}] launching Chromium (headless={HEADLESS})")
