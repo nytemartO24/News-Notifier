@@ -361,7 +361,12 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
             logger.warning(f"[{market}] homepage warm-up failed: {e}")
 
         for i, asin in enumerate(asins, start=1):
-            url = f"https://www.{config['domain']}/dp/{asin}"
+            # UNTESTED — "/-/en/" is Amazon's language-override path
+            # segment, believed to force English page text on non-English
+            # domains without changing anything else about the listing.
+            # Unlike "/en/dp/<asin>" (tried earlier, didn't work), this
+            # keeps the "-/" prefix Amazon's own language switcher uses.
+            url = f"https://www.{config['domain']}/-/en/dp/{asin}"
             logger.info(f"[{market}] ({i}/{len(asins)}) checking {asin}")
             start = time.monotonic()
             try:
