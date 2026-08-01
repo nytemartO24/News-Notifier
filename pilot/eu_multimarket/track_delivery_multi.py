@@ -2,20 +2,21 @@
 """
 LOCAL PILOT — EU multi-marketplace delivery-date tracker.
 
+No catalog scraping/discovery at all — this is a pure whitelist-based
+delivery-date checker. You maintain state/whitelist.txt by hand (one
+ASIN per line); every ASIN in it gets checked directly
+(https://www.<domain>/dp/<asin>, no search) on every market you name on
+the command line. There is no blacklist, no "new arrival" notification,
+no per-market product list — just a flat list of specific products you
+told it to watch, checked everywhere. Comment out a whitelist line
+(leading '#') to pause tracking that ASIN without losing it; delete the
+line to drop it for good.
+
 Extends scripts/track_delivery_date_playwright.py with per-marketplace
 locale handling (month names, "no date"/"out of stock" phrasing — see
 marketplaces.py). Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/ — does NOT touch scripts/delivery_state.json
 or any production state.
-
-There is one global, cross-market product list (state/products.txt) and
-one global blacklist (state/blacklist.txt) — see scrape_catalog_multi.py.
-Since ASINs are the same product across Amazon's EU marketplaces, this
-script computes ONE set of "tracked" ASINs (products.txt minus
-blacklist.txt) and checks EVERY one of them on EVERY requested market's
-domain, regardless of which market(s) it was originally discovered on.
-Comment out an ASIN's whole line in state/blacklist.txt to resume
-tracking it everywhere.
 
 NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for every market except "se" are
 unverified guesses (see marketplaces.py) — expect "UNKNOWN" results and
@@ -30,10 +31,9 @@ product.
 
 Usage:
     python pilot/eu_multimarket/track_delivery_multi.py [market ...]
-    # reads ASINs from state/products.txt (populated by
-    # scrape_catalog_multi.py, or seed it by hand for a quick test),
-    # minus whatever's currently in state/blacklist.txt, and checks that
-    # same list against every named market
+    # reads ASINs from state/whitelist.txt (create/edit it by hand) and
+    # checks that same list against every named market (default: all
+    # configured markets)
 
 Env vars:
     HEADLESS   "true" (default) or "false" — set false to watch the
@@ -56,8 +56,7 @@ from logging_setup import setup_logger
 from marketplaces import MARKETPLACES
 
 PILOT_DIR = Path(__file__).parent
-BLACKLIST_FILE = PILOT_DIR / "state" / "blacklist.txt"  # shared across all markets — see scrape_catalog_multi.py
-PRODUCTS_FILE = PILOT_DIR / "state" / "products.txt"  # shared across all markets — see scrape_catalog_multi.py
+WHITELIST_FILE = PILOT_DIR / "state" / "whitelist.txt"  # hand-maintained, shared across all markets
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
 HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
@@ -123,8 +122,8 @@ def notify(message: str, send_discord: bool) -> None:
 
 
 def load_asin_set(path: Path) -> set:
-    # Same convention as scrape_catalog_multi.py: a fully-commented line
-    # (leading '#') contributes no ASIN.
+    # A fully-commented line (leading '#') contributes no ASIN — that's
+    # how you pause tracking an item without deleting it.
     if not path.exists():
         return set()
     result = set()
@@ -135,23 +134,24 @@ def load_asin_set(path: Path) -> set:
     return result
 
 
-def load_tracked_asins() -> list[str]:
-    """The one global list of ASINs to check, on every market: everything
-    in the shared products.txt minus everything currently blacklisted."""
-    if not PRODUCTS_FILE.exists():
-        logger.warning(f"{PRODUCTS_FILE} doesn't exist yet — run scrape_catalog_multi.py first, or create it by hand.")
+def load_whitelist() -> list[str]:
+    if not WHITELIST_FILE.exists():
+        WHITELIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WHITELIST_FILE.write_text(
+            "# One ASIN per line — every one gets checked on every market you\n"
+            "# run this script against. Comment out a line ('#' at the very\n"
+            "# start) to pause tracking it without losing it; delete the line\n"
+            "# to drop it for good.\n"
+            "#\n"
+            "# Example:\n"
+            "# B0G4NF8QDZ  # Beyblade X Curse Mummy 7-55W UX Booster Pack\n"
+        )
+        logger.warning(f"Created {WHITELIST_FILE} — add ASINs and rerun.")
         return []
 
-    all_asins = load_asin_set(PRODUCTS_FILE)
-    blacklisted = load_asin_set(BLACKLIST_FILE)
-    tracked = sorted(all_asins - blacklisted)
-
-    skipped = len(all_asins) - len(tracked)
-    logger.info(
-        f"{len(tracked)} product(s) tracked ({skipped} blacklisted, excluded — comment out their line in "
-        "state/blacklist.txt to track them again)."
-    )
-    return tracked
+    asins = sorted(load_asin_set(WHITELIST_FILE))
+    logger.info(f"{len(asins)} product(s) in whitelist.")
+    return asins
 
 
 def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
@@ -336,7 +336,7 @@ if __name__ == "__main__":
 
     logger.info(f"=== START delivery_multi markets={args.markets} ===")
     try:
-        tracked_asins = load_tracked_asins()
+        tracked_asins = load_whitelist()
         if not tracked_asins:
             logger.info("Nothing to track — exiting.")
         else:
