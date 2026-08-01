@@ -70,6 +70,33 @@ CANDIDATE_SELECTORS = [
     "#mir-layout-DELIVERY_BLOCK",
 ]
 
+# UNVERIFIED — best-guess buybox selectors for "Dispatches from" / "Sold
+# by" info, not confirmed against real pages on any market here. Amazon's
+# buybox layout varies (classic #merchant-info vs newer tabular-buybox);
+# tune against real output the same way the delivery-date selectors were.
+SELLER_SELECTORS = [
+    "#merchant-info",
+    "#tabular-buybox",
+    "#aod-offer-soldBy",
+    "#usedBuyBoxOOS",
+]
+
+# UNVERIFIED — best-guess "sold by <seller>" phrasing per locale, used to
+# find the SPECIFIC seller name rather than just checking whether "amazon"
+# appears anywhere in the block. That distinction matters: a third-party
+# listing dispatched by Amazon but sold by someone else often still reads
+# "Dispatches from Amazon / Sold by Skydigital" — checking for "amazon"
+# anywhere in that block would wrongly call it Amazon-sold.
+SOLD_BY_PATTERNS = [
+    r"sold by\s*[:\-]?\s*([^.\n]+)",           # en
+    r"verkauft von\s*[:\-]?\s*([^.\n]+)",       # de
+    r"vendu(?:e)? par\s*[:\-]?\s*([^.\n]+)",     # fr
+    r"vendido por\s*[:\-]?\s*([^.\n]+)",          # es
+    r"venduto da\s*[:\-]?\s*([^.\n]+)",            # it
+    r"verkocht door\s*[:\-]?\s*([^.\n]+)",          # nl / be
+    r"sprzedawca[:\-]?\s*([^.\n]+)",                 # pl
+]
+
 MAX_NAME_LENGTH = 40
 
 logger = setup_logger("delivery_multi")
@@ -172,7 +199,36 @@ def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
         return False
 
 
-def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> str:
+def fetch_seller_info(soup) -> str:
+    for selector in SELLER_SELECTORS:
+        el = soup.select_one(selector)
+        if el and el.get_text(strip=True):
+            return el.get_text(" ", strip=True)
+    return ""
+
+
+def is_amazon_seller(seller_text: str):
+    """True/False/None (unknown, no seller block found at all).
+    Looks specifically for the "sold by <name>" portion via
+    SOLD_BY_PATTERNS and checks whether THAT name mentions Amazon — not
+    whether "amazon" appears anywhere in the block, since a third-party
+    listing dispatched by Amazon often still says "Dispatches from
+    Amazon / Sold by Skydigital", which mentions Amazon without being
+    Amazon-sold. Falls back to a whole-block check only if no "sold by"
+    label in any known language is found. UNVERIFIED against real pages
+    — tune this (and SELLER_SELECTORS/SOLD_BY_PATTERNS) if it starts
+    misclassifying."""
+    if not seller_text:
+        return None
+    text_lower = seller_text.lower()
+    for pattern in SOLD_BY_PATTERNS:
+        m = re.search(pattern, text_lower, re.IGNORECASE)
+        if m:
+            return "amazon" in m.group(1)
+    return "amazon" in text_lower
+
+
+def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
     logger.info(f"[{market}]   navigating to {url}")
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
@@ -187,6 +243,16 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
     html = page.content()
     soup = BeautifulSoup(html, "html.parser")
 
+    seller_text = fetch_seller_info(soup)
+    amazon_seller = is_amazon_seller(seller_text)
+    if seller_text:
+        logger.info(f"[{market}]   seller/dispatch block: {seller_text!r} (amazon={amazon_seller})")
+    else:
+        logger.info(f"[{market}]   no seller/dispatch block found (SELLER_SELECTORS unverified — see comment)")
+
+    def result(date: str) -> dict:
+        return {"date": date, "seller_text": seller_text, "is_amazon_seller": amazon_seller}
+
     text_blob = ""
     matched_selector = None
     for selector in CANDIDATE_SELECTORS:
@@ -200,9 +266,9 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
         logger.info(f"[{market}]   delivery text found via selector {matched_selector!r}")
         match = date_pattern.search(text_blob)
         if match:
-            result = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
-            logger.info(f"[{market}]   date pattern matched: {result!r}")
-            return result
+            date_str = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
+            logger.info(f"[{market}]   date pattern matched: {date_str!r}")
+            return result(date_str)
     else:
         # No known delivery-block selector matched. Deliberately do NOT
         # run the date pattern against the full page text here — it's too
@@ -222,19 +288,19 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
     for signal in config["out_of_stock_signals"]:
         if signal in full_text_lower:
             logger.info(f"[{market}]   matched out-of-stock signal: {signal!r}")
-            return "OUT OF STOCK (temporarily unavailable, no delivery date yet)"
+            return result("OUT OF STOCK (temporarily unavailable, no delivery date yet)")
 
     for signal in config["no_date_signals"]:
         if signal in full_text_lower:
             logger.info(f"[{market}]   matched no-date signal: {signal!r}")
-            return "NO DATE YET (listing has no confirmed delivery estimate)"
+            return result("NO DATE YET (listing has no confirmed delivery estimate)")
 
     debug_dir = PILOT_DIR / "state" / market
     debug_dir.mkdir(parents=True, exist_ok=True)
     debug_file = debug_dir / f"debug_{url.rsplit('/', 1)[-1]}.html"
     debug_file.write_text(html, encoding="utf-8")
     logger.info(f"[{market}]   no match at all — saved {debug_file}")
-    return "UNKNOWN — no date found, saved debug HTML"
+    return result("UNKNOWN — no date found, saved debug HTML")
 
 
 def get_product_title(page) -> str:
@@ -299,14 +365,20 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
             logger.info(f"[{market}] ({i}/{len(asins)}) checking {asin}")
             start = time.monotonic()
             try:
-                current_date = fetch_delivery_date(page, url, market, config, date_pattern)
+                result = fetch_delivery_date(page, url, market, config, date_pattern)
                 name = get_product_title(page)
             except Exception as e:
                 logger.warning(f"[{market}] ({i}/{len(asins)}) {asin} failed after {time.monotonic() - start:.1f}s: {e}")
                 continue
 
+            current_date = result["date"]
+            seller_text = result["seller_text"]
+            is_amazon = result["is_amazon_seller"]
             elapsed = time.monotonic() - start
-            logger.info(f"[{market}] ({i}/{len(asins)}) {asin} = {current_date!r} ({elapsed:.1f}s)")
+            seller_note = "amazon" if is_amazon else ("third-party" if is_amazon is False else "seller unknown")
+            logger.info(f"[{market}] ({i}/{len(asins)}) {asin} = {current_date!r} [{seller_note}] ({elapsed:.1f}s)")
+            if is_amazon is False:
+                logger.warning(f"[{market}] {asin}: NOT sold by Amazon (seller: {seller_text!r}) — price/date may not be Amazon's own")
 
             if current_date.startswith("UNKNOWN"):
                 logger.warning(f"[{market}] {asin}: {current_date} — keeping previous state")
@@ -320,15 +392,28 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
                     old_parsed is None or new_parsed < old_parsed
                 )
                 if became_earlier_or_new:
+                    seller_line = (
+                        f"  seller: {seller_text}"
+                        + (" ⚠️ NOT sold by Amazon" if is_amazon is False else "")
+                        + "\n"
+                        if seller_text
+                        else ""
+                    )
                     notify(
                         f"📦 [{market.upper()}] Delivery date moved earlier for **{name}**:\n"
                         f"  was: {previous_date}\n"
                         f"  now: {current_date}\n"
+                        f"{seller_line}"
                         f"  {url}",
                         send_discord,
                     )
 
-            state[asin] = {"name": name, "date": current_date}
+            state[asin] = {
+                "name": name,
+                "date": current_date,
+                "seller_text": seller_text,
+                "is_amazon_seller": is_amazon,
+            }
 
         logger.info(f"[{market}] closing browser")
         browser.close()
@@ -336,17 +421,23 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
     rows = [
-        (parse_date_for_sorting(info["date"], config["months"]), truncate_name(info["name"]), info["date"])
+        (
+            parse_date_for_sorting(info["date"], config["months"]),
+            truncate_name(info["name"]),
+            info["date"],
+            info.get("is_amazon_seller"),
+        )
         for asin, info in state.items()
         if asin in asins
     ]
     rows.sort(key=lambda r: (r[0] is None, r[0]))
 
-    name_width = max((len(name) for _, name, _ in rows), default=len("Product"))
+    name_width = max((len(name) for _, name, _, _ in rows), default=len("Product"))
     separator = "-" * (name_width + 3 + 40)
     logger.info(f"DELIVERY SUMMARY [{market.upper()}] — {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    for _, name, date_str in rows:
-        logger.info(f"  {name:<{name_width}} | {date_str}")
+    for _, name, date_str, is_amazon in rows:
+        flag = " ⚠️ NOT AMAZON" if is_amazon is False else ("" if is_amazon else " (seller unknown)")
+        logger.info(f"  {name:<{name_width}} | {date_str}{flag}")
 
 
 if __name__ == "__main__":

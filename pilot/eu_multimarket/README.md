@@ -24,6 +24,11 @@ Just `state/whitelist.txt` — one ASIN per line, maintained by hand — and
    the same product, so it's worth checking everywhere).
 3. Alerts (Discord, or logged in dry-run) only when a real delivery date
    newly appears or moves earlier — same logic as production.
+4. Also extracts the buybox's "Sold by" / "Dispatches from" info and
+   flags whether the listing is actually sold by Amazon, or by a
+   third-party seller (possible scalper pricing) — logged per product,
+   included in Discord alerts, and flagged with `⚠️ NOT AMAZON` in the
+   summary table.
 
 To add a product: find its ASIN (from the product URL,
 `amazon.se/dp/<ASIN>`) and add a line to `state/whitelist.txt`. To pause
@@ -52,6 +57,16 @@ an example line and exits — edit it and rerun.
 - Date parsing (`build_date_pattern`) assumes each locale's dates look
   like `21. Januar 2027` / `21 janvier 2027` / etc. — verify against
   real pages per market.
+- Seller detection (`SELLER_SELECTORS`, `SOLD_BY_PATTERNS`) is a
+  best-guess at Amazon's buybox structure and per-locale "sold by"
+  phrasing, **not confirmed against any real page yet** — this couldn't
+  be tested from the environment that wrote it (network access to
+  Amazon is blocked there). If a listing you know is Amazon-sold shows
+  up flagged `⚠️ NOT AMAZON` (or vice versa), check
+  `state/<market>/debug_*.html` isn't the only place seller info would
+  show up — that file only gets saved when the delivery date itself
+  can't be found, not on a seller misclassification — and tune
+  `SELLER_SELECTORS`/`SOLD_BY_PATTERNS` from real page HTML instead.
 
 ## Setup
 
