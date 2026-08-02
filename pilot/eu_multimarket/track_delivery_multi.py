@@ -50,7 +50,7 @@ import time
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 sys.path.insert(0, str(Path(__file__).parent))
 from logging_setup import setup_logger
@@ -230,6 +230,21 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
         if not dismiss_continue_shopping_interstitial(page, market):
             break
         logger.info(f"[{market}]   re-checking for a chained interstitial (attempt {attempt + 1}/2)")
+
+    # Delivery/seller blocks are often injected client-side via JS after
+    # domcontentloaded — confirmed via a real .de page's raw server HTML,
+    # which had neither present at all despite being a normal, purchasable
+    # listing (Add-to-Cart, buybox all present). A fixed 2s sleep isn't
+    # always enough for that JS to finish, even on .se (which still saw
+    # some UNKNOWN results in a full test run). Wait adaptively for any
+    # target selector to appear, falling through to the existing
+    # not-found handling on timeout rather than failing outright.
+    combined_selector = ", ".join(CANDIDATE_SELECTORS + [SELLER_CONTAINER_SELECTOR])
+    try:
+        page.wait_for_selector(combined_selector, timeout=6000)
+        logger.info(f"[{market}]   a target selector appeared")
+    except PlaywrightTimeoutError:
+        logger.info(f"[{market}]   no target selector appeared within 6s — proceeding anyway")
 
     logger.info(f"[{market}]   reading page content")
     html = page.content()
