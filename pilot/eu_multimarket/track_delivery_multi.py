@@ -220,9 +220,22 @@ def is_amazon_seller(seller_text: str):
     return "amazon" in seller_text.lower()
 
 
-def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
+def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
     logger.info(f"[{market}]   navigating to {url}")
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        # Amazon occasionally triggers a spurious download prompt on
+        # navigation (seen live: "Download is starting") — the catalog
+        # scraper already tolerates this (safe_goto); the delivery
+        # tracker didn't, so one flaky nav crashed the item AND cascaded
+        # into "navigation interrupted" errors for every item after it,
+        # since the aborted goto left the page mid-transition.
+        if "Download is starting" in str(e):
+            logger.info(f"[{market}]   navigation triggered a spurious download prompt, continuing anyway")
+            page.wait_for_timeout(1000)
+        else:
+            raise
     logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
     page.wait_for_timeout(2000)
 
@@ -230,6 +243,28 @@ def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern:
         if not dismiss_continue_shopping_interstitial(page, market):
             break
         logger.info(f"[{market}]   re-checking for a chained interstitial (attempt {attempt + 1}/2)")
+
+    # A debug dump captured for .se ASIN B0G4NF8QDZ turned out to be the
+    # plain Amazon.se homepage (title "Amazon.se: Low Prices...",
+    # canonical "/-/en/", zero occurrences of the ASIN anywhere in the
+    # HTML) — proof a goto can silently land somewhere other than the
+    # product page (most likely a prior item's "Download is starting"
+    # navigation bleeding into this one on the shared page/context) and
+    # get read downstream as "delivery block just isn't there" instead of
+    # "we're not even on the right page." Catch that explicitly rather
+    # than inferring it from missing selectors after the fact.
+    current_url = page.url
+    if asin not in current_url:
+        logger.warning(f"[{market}]   landed on {current_url!r} instead of the product page for {asin} — retrying navigation once")
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+        for attempt in range(2):
+            if not dismiss_continue_shopping_interstitial(page, market):
+                break
+        current_url = page.url
+        if asin not in current_url:
+            logger.warning(f"[{market}]   still on {current_url!r} after retry — giving up on {asin} for this pass")
+            return {"date": "UNKNOWN — navigation didn't reach the product page", "seller_text": "", "is_amazon_seller": None}
 
     # Delivery/seller blocks are often injected client-side via JS after
     # domcontentloaded — confirmed via a real .de page's raw server HTML,
@@ -368,16 +403,25 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
             logger.warning(f"[{market}] homepage warm-up failed: {e}")
 
         for i, asin in enumerate(asins, start=1):
-            # UNTESTED — "/-/en/" is Amazon's language-override path
-            # segment, believed to force English page text on non-English
-            # domains without changing anything else about the listing.
-            # Unlike "/en/dp/<asin>" (tried earlier, didn't work), this
-            # keeps the "-/" prefix Amazon's own language switcher uses.
+            # "/-/en/" is Amazon's language-override path segment, forcing
+            # English page text on non-English domains. Confirmed reaching
+            # the real product page (not a redirect) via a real .de
+            # product's raw server HTML (view-source, actual product
+            # title present). It was reverted for one run on the theory
+            # that it served incomplete content, based on de/es/it/pl
+            # staying at 0/8 real dates — but a debug dump from that same
+            # run turned out to be the .se homepage, not a product page,
+            # which points at the known "Download is starting" nav
+            # cascade (now caught, see fetch_delivery_date) as the actual
+            # cause, not the URL form. Restored; fetch_delivery_date now
+            # also verifies the ASIN is actually in page.url() before
+            # trusting the page content, so a stray redirect/cascade is
+            # caught and retried instead of silently misread.
             url = f"https://www.{config['domain']}/-/en/dp/{asin}"
             logger.info(f"[{market}] ({i}/{len(asins)}) checking {asin}")
             start = time.monotonic()
             try:
-                result = fetch_delivery_date(page, url, market, config, date_pattern)
+                result = fetch_delivery_date(page, url, asin, market, config, date_pattern)
                 name = get_product_title(page)
             except Exception as e:
                 logger.warning(f"[{market}] ({i}/{len(asins)}) {asin} failed after {time.monotonic() - start:.1f}s: {e}")
