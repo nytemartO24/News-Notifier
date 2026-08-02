@@ -222,7 +222,20 @@ def is_amazon_seller(seller_text: str):
 
 def fetch_delivery_date(page, url: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
     logger.info(f"[{market}]   navigating to {url}")
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        # Amazon occasionally triggers a spurious download prompt on
+        # navigation (seen live: "Download is starting") — the catalog
+        # scraper already tolerates this (safe_goto); the delivery
+        # tracker didn't, so one flaky nav crashed the item AND cascaded
+        # into "navigation interrupted" errors for every item after it,
+        # since the aborted goto left the page mid-transition.
+        if "Download is starting" in str(e):
+            logger.info(f"[{market}]   navigation triggered a spurious download prompt, continuing anyway")
+            page.wait_for_timeout(1000)
+        else:
+            raise
     logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
     page.wait_for_timeout(2000)
 
@@ -368,12 +381,15 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
             logger.warning(f"[{market}] homepage warm-up failed: {e}")
 
         for i, asin in enumerate(asins, start=1):
-            # UNTESTED — "/-/en/" is Amazon's language-override path
-            # segment, believed to force English page text on non-English
-            # domains without changing anything else about the listing.
-            # Unlike "/en/dp/<asin>" (tried earlier, didn't work), this
-            # keeps the "-/" prefix Amazon's own language switcher uses.
-            url = f"https://www.{config['domain']}/-/en/dp/{asin}"
+            # Reverted the "/-/en/" language-override prefix: two full
+            # 8-market test runs with it in place showed de/es/it/pl
+            # still stuck at 0/8 real dates even with the adaptive
+            # wait_for_selector fix (every check timing out at the full
+            # ~10s, not "arriving late"), which points at the URL variant
+            # itself serving different/incomplete content rather than a
+            # timing problem. Plain /dp/<asin> was the known-working form
+            # before "/-/en/" was introduced (never confirmed to help).
+            url = f"https://www.{config['domain']}/dp/{asin}"
             logger.info(f"[{market}] ({i}/{len(asins)}) checking {asin}")
             start = time.monotonic()
             try:
