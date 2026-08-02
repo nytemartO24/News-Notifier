@@ -1,0 +1,75 @@
+name: Pilot-EU-Multimarket-Test
+
+# Manual, on-demand test runner for pilot/eu_multimarket/ (see its
+# README). GitHub's hosted runners have normal, unrestricted internet
+# access unlike some sandboxed dev environments, which makes this useful
+# for verifying scraping/parsing logic changes against real Amazon pages
+# without needing anyone's own machine or VPS.
+#
+# Deliberately NOT on a schedule, NOT wired into any cron, and does NOT
+# commit anything back to the repo — this is a throwaway verification
+# run only. ASINs come from the workflow_dispatch input, not from a
+# committed whitelist.txt (pilot state is gitignored and not present in
+# a fresh checkout).
+
+on:
+  workflow_dispatch:
+    inputs:
+      asins:
+        description: "Comma-separated ASINs to check, e.g. B0G4NF8QDZ,B0G4NDFS5R"
+        required: true
+      markets:
+        description: "Space-separated market codes (see pilot/eu_multimarket/marketplaces.py)"
+        required: false
+        default: "se de"
+      send_discord:
+        description: "Actually post to Discord instead of just logging (uses the same repo secrets as production)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read  # read-only — this workflow never commits anything back
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pilot/eu_multimarket/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r pilot/eu_multimarket/requirements.txt
+
+      - name: Install Playwright's Chromium and its OS dependencies
+        run: python -m playwright install --with-deps chromium
+
+      - name: Seed whitelist.txt from workflow input
+        run: |
+          mkdir -p pilot/eu_multimarket/state
+          echo "${{ inputs.asins }}" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$' > pilot/eu_multimarket/state/whitelist.txt
+          echo "Whitelist for this run:"
+          cat pilot/eu_multimarket/state/whitelist.txt
+
+      - name: Run track_delivery_multi.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+        run: |
+          python pilot/eu_multimarket/track_delivery_multi.py ${{ inputs.markets }} \
+            ${{ inputs.send_discord == 'true' && '--send-discord' || '' }}
+
+      - name: Upload state (debug HTML, delivery_state.json) as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-eu-multimarket-state
+          path: pilot/eu_multimarket/state/
+          retention-days: 7
