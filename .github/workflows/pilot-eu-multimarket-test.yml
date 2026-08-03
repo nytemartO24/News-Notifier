@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      debug:
+        description: "Verbose page diagnostics for EVERY product (selector-by-selector presence, page language, date-like strings, delivery wording). Leave on — UNKNOWN results always log this, but debug also logs the products that DID resolve, which is what you compare against."
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read  # read-only — this workflow never commits anything back
@@ -62,14 +67,46 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+          DEBUG: ${{ inputs.debug }}
         run: |
           python pilot/eu_multimarket/track_delivery_multi.py ${{ inputs.markets }} \
             ${{ inputs.send_discord == 'true' && '--send-discord' || '' }}
+
+      # The job log is the reliable channel for getting results out of
+      # this workflow: the artifact below is hosted on Azure Blob
+      # Storage, which the restrictive proxies used by sandboxed dev
+      # environments tend to block, so it often can't be fetched
+      # programmatically. Echo the small, high-value files into the log
+      # so a run is fully diagnosable from `gh run view --log` alone.
+      - name: Echo resulting state into the log
+        if: always()
+        run: |
+          echo "::group::state/ tree"
+          find pilot/eu_multimarket/state -type f -printf '%10s  %p\n' | sort -k2 || true
+          echo "::endgroup::"
+
+          for f in pilot/eu_multimarket/state/*/delivery_state.json; do
+            [ -e "$f" ] || continue
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+
+          # Not the debug HTML itself — an Amazon product page is ~2 MB
+          # of markup and unreadable in a log. The scraper already
+          # summarises each one (page language, selector presence,
+          # date-like strings, delivery wording) into the log at the
+          # point it gives up; this is just the index of what got saved.
+          echo "::group::debug HTML dumps saved (contents summarised inline in the run log above)"
+          ls -la pilot/eu_multimarket/state/*/debug_*.html 2>/dev/null || echo "none — nothing came back UNKNOWN"
+          echo "::endgroup::"
 
       - name: Upload state (debug HTML, delivery_state.json) as an artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pilot-eu-multimarket-state
-          path: pilot/eu_multimarket/state/
+          path: |
+            pilot/eu_multimarket/state/
+            pilot/eu_multimarket/logs/
           retention-days: 7
