@@ -42,21 +42,61 @@ echo "B0G4NF8QDZ  # Beyblade X Curse Mummy 7-55W UX Booster Pack" >> pilot/eu_mu
 If `state/whitelist.txt` doesn't exist yet, the script creates it with
 an example line and exits — edit it and rerun.
 
+## Page language — read this before touching `marketplaces.py`
+
+Product URLs use Amazon's `/-/en/` language-override path segment, so
+**the rendered page text is English, not the market's native language.**
+For a long time every market except `se` declared only native month
+names and native signal phrases, which meant nothing could match on an
+English page — and `se` was the one market whose tables already held the
+English names. That is the single biggest reason the non-`se` markets
+were returning `UNKNOWN`. Measured against English delivery text, the
+old per-market month tables could match:
+
+| market | months matchable | observed hit rate at the time |
+|---|---|---|
+| `se` | 12/12 | the only market that worked |
+| `de` | 6/12 (`Januar`≈`January`, `April`, `August`, …) | 0/8 |
+| `nl` / `be` | 4/12 | 0-1/8 |
+| `fr` / `es` / `it` / `pl` | 0/12 | 0/8 |
+
+Every market now gets the **union** of shared English tables and its own
+native ones, and `locale` is pinned to `en-<CC>` so the Accept-Language
+header agrees with the URL instead of fighting it. Whichever language
+Amazon actually serves, it parses. If you add a market, add its native
+tables — the English ones are merged in for you by `_merge()`.
+
+`de` at 6/12 does not fully explain its 0/8, so at least one other
+factor was in play there (consistent with the real `.de` server HTML
+showing no delivery block at all — see the client-side-injection note in
+the root `CLAUDE.md`). The adaptive `wait_for_selector` and the cookie
+banner dismissal are the mitigations for that half; they still need a
+real run to confirm.
+
 ## Known unknowns (why this is a pilot and not a rollout)
 
-- Every market except `se`'s `no_date_signals` and `out_of_stock_signals`
-  in `marketplaces.py` are **guessed** phrasings translated from the
-  English list, not confirmed against real Amazon pages in that locale.
-  Expect `UNKNOWN` results and `state/<market>/debug_*.html` dumps on
-  first runs — read those dumps and correct the phrase lists to match
-  what's actually on the page.
-- Belgium (`be`) is bilingual (Dutch/French) but only has the Dutch
-  phrase list so far — if French-language listings show up as
-  `UNKNOWN`, that's why; add French phrases to `marketplaces["be"]`
-  once you see it happen.
-- Date parsing (`build_date_pattern`) assumes each locale's dates look
-  like `21. Januar 2027` / `21 janvier 2027` / etc. — verify against
-  real pages per market.
+- Native-language `no_date_signals` / `out_of_stock_signals` in
+  `marketplaces.py` are still **guessed** translations, unconfirmed
+  against real pages in those locales. They now sit behind the verified
+  English phrasing as a fallback rather than being the only thing
+  standing between a page and `UNKNOWN`, so a bad guess is much less
+  costly than it was — but read `state/<market>/debug_*.html` dumps and
+  correct them when you see them.
+- Belgium (`be`) is bilingual, so it carries both Dutch and French month
+  names and phrase lists.
+- Date parsing handles day-first (`21 January`, `21. Januar`,
+  `15 de agosto`, `12 sierpnia`), month-first (`January 21, 2027`),
+  abbreviations (`12 Aug.`), and ordinals (`1st`/`1er`/`1°`). Polish is
+  listed in both genitive (`sierpnia` — the form dates actually use) and
+  nominative; the nominative-only table it had before could not match a
+  single real Polish date.
+- Extracted dates are sanity-checked against a 0..400-day window
+  (`MAX_DELIVERY_HORIZON_DAYS`) before being trusted, and signal phrases
+  are matched only inside the availability/buybox region
+  (`AVAILABILITY_SELECTORS`) rather than the whole page — a whole-page
+  search for `release date` matches the product-details table on
+  essentially every toy listing, which turned "delivery block hasn't
+  rendered" into a confident, wrong `NO DATE YET`.
 - Seller detection targets `#merchantInfoFeature_feature_div`, confirmed
   directly against real HTML from both an Amazon-sold listing and a
   third-party one (Skydigital) — it consistently holds the actual seller

@@ -68,7 +68,39 @@ CANDIDATE_SELECTORS = [
     "#contextualIngressPtLabel_deliveryShortDeliveryDate",
     "#deliveryMessageMirId",
     "#mir-layout-DELIVERY_BLOCK",
+    # Layout-independent fallbacks. The first is the attribute Amazon
+    # tags its unified delivery-promise container with, which survives
+    # the element-id churn that differs between markets/experiments; the
+    # rest are older ids still seen on some layouts. All are
+    # delivery-specific, so widening here cannot pull in a review date
+    # or an editorial date the way a full-page regex search would.
+    '[data-csa-c-content-id="DEXUnifiedCXPDM"]',
+    "#ddmDeliveryMessage",
+    "#fast-track-message",
 ]
+
+# Signal phrases are matched ONLY inside these, never against the whole
+# page. Whole-page matching is a false-positive machine: an Amazon toy
+# listing's product-details table almost always contains a "Release
+# date" row, so a page whose delivery block simply hadn't rendered would
+# get confidently reported as "NO DATE YET" rather than the honest
+# UNKNOWN. These containers hold availability/buybox copy only — the
+# details table, reviews and related-items carousels are all outside
+# them.
+AVAILABILITY_SELECTORS = [
+    "#availability",
+    "#outOfStock",
+    "#exports_desktop_outOfStock_buybox_feature_div",
+    "#desktop_buybox",
+    "#qualifiedBuybox",
+    "#buybox",
+]
+
+# A delivery estimate is never in the past, and Amazon does not quote
+# arrivals years out. Anything outside this window is a parse artefact
+# (a stray "2019" in marketing copy, a mis-anchored day number), so it
+# is rejected rather than stored and alerted on.
+MAX_DELIVERY_HORIZON_DAYS = 400
 
 # Confirmed against real product-page HTML (both an Amazon-sold and a
 # third-party-sold listing): #merchantInfoFeature_feature_div always
@@ -92,28 +124,82 @@ MAX_NAME_LENGTH = 40
 logger = setup_logger("delivery_multi")
 
 
+# Ordinal/連 suffixes and connectors that sit between the day number and
+# the month name across the pilot's locales: English "1st", French
+# "1er", Spanish "15 de enero", Italian "1°", Portuguese-style "1ª".
+# Without the Spanish connector, "15 de enero" cannot match at all —
+# which is part of why .es returned nothing.
+_ORDINAL = r"(?:st|nd|rd|th|er|ère|ème|°|º|ª)?"
+_CONNECTOR = r"(?:de\s+|d'|di\s+)?"
+
+
 def build_date_pattern(months: dict) -> re.Pattern:
-    names = "|".join(sorted(months.keys(), key=len, reverse=True))
-    return re.compile(rf"\d{{1,2}}\.?\s+(?:{names})\.?,?\s*(?:\d{{4}})?", re.IGNORECASE)
+    """Match a date in either order, in any of the configured languages.
+
+    Day-first ("21 January 2027", "21. Januar", "15 de enero",
+    "12 sierpnia") covers every EU locale here; month-first
+    ("January 21, 2027") is how Amazon renders US-English dates and
+    shows up on the "/-/en/" override on some markets. The old pattern
+    handled day-first only.
+
+    Names are alternated longest-first so an abbreviation can never
+    shadow the full name it prefixes ("mar" vs "marca"/"marzo").
+    """
+    names = "|".join(re.escape(n) for n in sorted(months, key=len, reverse=True))
+    day_first = (
+        rf"(?<!\d)(?P<d1>\d{{1,2}})\.?{_ORDINAL}\s+{_CONNECTOR}"
+        rf"(?P<m1>{names})\.?,?\s*(?:de\s+)?(?P<y1>\d{{4}})?(?!\d)"
+    )
+    month_first = (
+        rf"(?P<m2>{names})\.?\s+(?<!\d)(?P<d2>\d{{1,2}})\.?{_ORDINAL},?"
+        rf"\s*(?P<y2>\d{{4}})?(?!\d)"
+    )
+    return re.compile(rf"(?:{day_first})|(?:{month_first})", re.IGNORECASE)
 
 
-def parse_date_for_sorting(date_str: str, months: dict):
-    m = re.search(r"(\d{1,2})\.?\s+([^\s\d]+)\.?,?\s*(\d{4})?", date_str)
-    if not m:
+# build_date_pattern() is called for every parse, including once per
+# stored state entry — cache per market rather than recompiling.
+_PATTERN_CACHE: dict[frozenset, re.Pattern] = {}
+
+
+def pattern_for(months: dict) -> re.Pattern:
+    key = frozenset(months.items())
+    if key not in _PATTERN_CACHE:
+        _PATTERN_CACHE[key] = build_date_pattern(months)
+    return _PATTERN_CACHE[key]
+
+
+def date_from_match(match: re.Match, months: dict):
+    """Turn a build_date_pattern() match into a real date, or None."""
+    day = match.group("d1") or match.group("d2")
+    month_name = match.group("m1") or match.group("m2")
+    year = match.group("y1") or match.group("y2")
+    if not day or not month_name:
         return None
-    day, month_name, year = m.groups()
     month = months.get(month_name.lower())
     if not month:
         return None
     today = datetime.date.today()
-    year = int(year) if year else today.year
     try:
-        parsed = datetime.date(year, month, int(day))
+        parsed = datetime.date(int(year) if year else today.year, month, int(day))
     except ValueError:
         return None
-    if not m.group(3) and parsed < today:
-        parsed = parsed.replace(year=year + 1)
+    # No year printed (Amazon usually omits it) and the date already
+    # passed this year -> it must mean next year.
+    if not year and parsed < today:
+        parsed = parsed.replace(year=parsed.year + 1)
     return parsed
+
+
+def parse_date_for_sorting(date_str: str, months: dict):
+    match = pattern_for(months).search(date_str)
+    return date_from_match(match, months) if match else None
+
+
+def is_plausible_delivery_date(parsed) -> bool:
+    if parsed is None:
+        return False
+    return 0 <= (parsed - datetime.date.today()).days <= MAX_DELIVERY_HORIZON_DAYS
 
 
 def notify(message: str, send_discord: bool) -> None:
@@ -189,6 +275,26 @@ def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
         return False
 
 
+def dismiss_cookie_banner(page, market: str) -> bool:
+    """Amazon's EU cookie-consent banner ('Accept'/'Alle akzeptieren').
+    Production never had to deal with it because the VPS's browser
+    profile is warm, but each pilot run starts from a blank context on a
+    market it has never visited. On some markets the banner is a
+    full-page interstitial rather than an overlay, in which case nothing
+    downstream can possibly find a delivery block until it's cleared."""
+    try:
+        button = page.locator("#sp-cc-accept")
+        if button.count() == 0:
+            return False
+        button.first.click()
+        page.wait_for_timeout(1000)
+        logger.info(f"[{market}]     cookie banner accepted")
+        return True
+    except Exception as e:
+        logger.warning(f"[{market}]     cookie banner dismissal failed: {e}")
+        return False
+
+
 def fetch_seller_info(soup) -> str:
     container = soup.select_one(SELLER_CONTAINER_SELECTOR)
     if container:
@@ -239,6 +345,8 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
     logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
     page.wait_for_timeout(2000)
 
+    dismiss_cookie_banner(page, market)
+
     for attempt in range(2):
         if not dismiss_continue_shopping_interstitial(page, market):
             break
@@ -274,7 +382,9 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
     # some UNKNOWN results in a full test run). Wait adaptively for any
     # target selector to appear, falling through to the existing
     # not-found handling on timeout rather than failing outright.
-    combined_selector = ", ".join(CANDIDATE_SELECTORS + [SELLER_CONTAINER_SELECTOR])
+    combined_selector = ", ".join(
+        CANDIDATE_SELECTORS + AVAILABILITY_SELECTORS + [SELLER_CONTAINER_SELECTOR]
+    )
     try:
         page.wait_for_selector(combined_selector, timeout=6000)
         logger.info(f"[{market}]   a target selector appeared")
@@ -309,8 +419,20 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
         match = date_pattern.search(text_blob)
         if match:
             date_str = re.sub(r"\s+", " ", match.group()).strip().rstrip(",")
-            logger.info(f"[{market}]   date pattern matched: {date_str!r}")
-            return result(date_str)
+            parsed = date_from_match(match, config["months"])
+            # Sanity-check before trusting it. A delivery block can
+            # legitimately contain text we mis-anchor on, and a bogus
+            # date here is worse than no date: it gets stored as the
+            # baseline and can fire a "moved earlier" alert.
+            if is_plausible_delivery_date(parsed):
+                logger.info(f"[{market}]   date pattern matched: {date_str!r} -> {parsed}")
+                return result(date_str)
+            logger.warning(
+                f"[{market}]   rejecting implausible date {date_str!r} (parsed as {parsed}) "
+                f"from {matched_selector!r} — not within 0..{MAX_DELIVERY_HORIZON_DAYS} days"
+            )
+        else:
+            logger.info(f"[{market}]   delivery block matched but no date pattern in {text_blob[:200]!r}")
     else:
         # No known delivery-block selector matched. Deliberately do NOT
         # run the date pattern against the full page text here — it's too
@@ -324,18 +446,36 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
         # unrelated date would sail through looking like a real one.
         logger.info(f"[{market}]   no delivery-block selector matched — skipping date-pattern search entirely")
 
-    logger.info(f"[{market}]   checking out-of-stock/no-date signal phrases")
-    full_text_lower = soup.get_text(" ", strip=True).lower()
+    # Signals are matched against the availability/buybox region only —
+    # NOT the whole page (see AVAILABILITY_SELECTORS). If none of those
+    # containers exist we genuinely know nothing about this page, so we
+    # fall through to UNKNOWN + a debug dump instead of inventing a
+    # state from whatever prose happens to be lying around.
+    availability_parts = []
+    for selector in AVAILABILITY_SELECTORS:
+        for el in soup.select(selector):
+            text = el.get_text(" ", strip=True)
+            if text:
+                availability_parts.append(text)
 
-    for signal in config["out_of_stock_signals"]:
-        if signal in full_text_lower:
-            logger.info(f"[{market}]   matched out-of-stock signal: {signal!r}")
-            return result("OUT OF STOCK (temporarily unavailable, no delivery date yet)")
+    if availability_parts:
+        signal_text = " ".join(availability_parts).lower()
+        logger.info(
+            f"[{market}]   checking signal phrases against availability region "
+            f"({len(signal_text)} chars)"
+        )
+        for signal in config["out_of_stock_signals"]:
+            if signal in signal_text:
+                logger.info(f"[{market}]   matched out-of-stock signal: {signal!r}")
+                return result("OUT OF STOCK (temporarily unavailable, no delivery date yet)")
 
-    for signal in config["no_date_signals"]:
-        if signal in full_text_lower:
-            logger.info(f"[{market}]   matched no-date signal: {signal!r}")
-            return result("NO DATE YET (listing has no confirmed delivery estimate)")
+        for signal in config["no_date_signals"]:
+            if signal in signal_text:
+                logger.info(f"[{market}]   matched no-date signal: {signal!r}")
+                return result("NO DATE YET (listing has no confirmed delivery estimate)")
+        logger.info(f"[{market}]   no signal phrase matched in the availability region")
+    else:
+        logger.info(f"[{market}]   no availability/buybox container found — skipping signal check")
 
     debug_dir = PILOT_DIR / "state" / market
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -346,8 +486,17 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
 
 
 def get_product_title(page) -> str:
+    """Amazon titles read "Product Name : Amazon.de: Toys". Split on the
+    " : Amazon" marker specifically rather than a bare " :" — product
+    names themselves contain colons often enough (e.g. "Beyblade X:
+    Xtreme Battle") that the loose split was truncating real names."""
     title = page.title()
-    return title.split(" :")[0].strip() if title else "Unknown product"
+    if not title:
+        return "Unknown product"
+    for marker in (" : Amazon", " | Amazon", ": Amazon"):
+        if marker in title:
+            return title.split(marker)[0].strip()
+    return title.strip()
 
 
 def truncate_name(name: str) -> str:
@@ -374,11 +523,15 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
     # replaced), not a value worth protecting via "keep previous state on
     # UNKNOWN." Discard it so a genuinely unavailable date reads as
     # missing rather than as a stale, misleading one.
-    today = datetime.date.today()
+    # Widened from "in the past" to the same plausibility window used
+    # when accepting a fresh date, so a bogus far-future date written by
+    # an earlier buggy run is cleaned out too rather than sitting there
+    # forever as an unbeatable "earliest known" baseline.
     for asin in list(state.keys()):
-        parsed = parse_date_for_sorting(state[asin].get("date", ""), config["months"])
-        if parsed is not None and parsed < today:
-            logger.warning(f"[{market}] discarding stale state for {asin}: {state[asin]['date']!r} is in the past")
+        raw = state[asin].get("date", "")
+        parsed = parse_date_for_sorting(raw, config["months"])
+        if parsed is not None and not is_plausible_delivery_date(parsed):
+            logger.warning(f"[{market}] discarding stale state for {asin}: {raw!r} is outside the plausible window")
             del state[asin]
 
     with sync_playwright() as p:
@@ -393,10 +546,19 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> None:
         )
         page = context.new_page()
 
-        logger.info(f"[{market}] warming up: navigating to https://www.{config['domain']}/")
+        # Warm up on the "/-/en/" homepage, not the bare domain. The bare
+        # domain sets the session's language cookie to the market's
+        # native language, which then has to be fought off by the
+        # "/-/en/" prefix on every subsequent product URL; warming up on
+        # the English homepage sets that cookie to English up front so
+        # the whole session agrees on one language. Also gets the cookie
+        # banner out of the way once instead of per product.
+        warmup_url = f"https://www.{config['domain']}/-/en/"
+        logger.info(f"[{market}] warming up: navigating to {warmup_url}")
         try:
-            page.goto(f"https://www.{config['domain']}/", wait_until="domcontentloaded", timeout=30000)
+            page.goto(warmup_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
+            dismiss_cookie_banner(page, market)
             dismiss_continue_shopping_interstitial(page, market)
             logger.info(f"[{market}] warm-up complete")
         except Exception as e:

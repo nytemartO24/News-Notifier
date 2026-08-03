@@ -90,6 +90,33 @@ Also detects **Amazon vs. third-party seller** per listing
 from both an Amazon-sold and a Skydigital-sold listing) so you can tell a
 fair Amazon-set price from a marketplace/scalper price.
 
+**Page language — the big one, fixed but not yet re-verified**: product
+URLs use the `/-/en/` override, so pages render in **English**, but every
+market except `se` declared only *native* month names and signal phrases
+in `marketplaces.py` — so nothing could match. `se` was the sole market
+whose tables already contained English, which is exactly why `se` was the
+only market that worked. Measured against English delivery text, the old
+tables could match 12/12 months for `se`, 6/12 for `de`, 4/12 for
+`nl`/`be`, and **0/12 for `fr`/`es`/`it`/`pl`** — which tracks the
+observed hit rates closely. Fixed by merging shared English tables into
+every market (`_merge()` in `marketplaces.py`) and pinning `locale` to
+`en-<CC>` so Accept-Language stops fighting the URL. `de`'s 6/12 doesn't
+fully explain its 0/8, so the client-side-injection issue below is a real
+second factor there. Don't "simplify" a market back down to native-only
+tables.
+
+Also fixed alongside it, all in the same direction (fewer confident-but-wrong
+results): date parsing now handles month-first order, abbreviations,
+ordinals, the Spanish `15 de agosto` connector and Polish genitive month
+forms (`sierpnia`, not `sierpień` — dates never use the nominative);
+extracted dates are range-checked (0..400 days) before being stored or
+alerted on; signal phrases are matched only within the availability/buybox
+region instead of the whole page (a whole-page `release date` match hits
+the product-details table of essentially every toy listing, turning "the
+delivery block hasn't rendered" into a confident wrong `NO DATE YET`); and
+the EU cookie-consent banner (`#sp-cc-accept`) is dismissed, which
+production never had to handle because its VPS browser profile is warm.
+
 **Known reliability issue, actively being debugged**: a full 8-market ×
 8-ASIN GitHub Actions test run (see below) found only `.se` reliably
 returns real delivery dates (5/8) with correct seller detection (5/5 of
