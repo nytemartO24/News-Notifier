@@ -42,6 +42,45 @@ echo "B0G4NF8QDZ  # Beyblade X Curse Mummy 7-55W UX Booster Pack" >> pilot/eu_mu
 If `state/whitelist.txt` doesn't exist yet, the script creates it with
 an example line and exits — edit it and rerun.
 
+## Troubleshooting a run (`--debug`)
+
+Runs happen via the **Pilot-EU-Multimarket-Test** GitHub Actions
+workflow, and **the job log is the channel to read results from** — the
+`state/` artifact is on Azure Blob Storage, which restrictive proxies
+tend to block, so it often can't be downloaded. Everything you'd want
+out of the debug HTML is therefore summarised into the log itself.
+
+The workflow's `debug` input (default **on**) sets `DEBUG=true`, which is
+equivalent to passing `--debug`. What you get:
+
+- **Always, debug or not** — every `UNKNOWN` result logs a full page
+  snapshot at the moment it gave up.
+- **With `--debug`** — that same snapshot for *every* product, including
+  the ones that resolved fine. That's the comparison you actually need:
+  seeing what a working `.se` page looks like next to a failing `.de`
+  one is what localises the problem.
+
+Each snapshot contains:
+
+| line | what it tells you |
+|---|---|
+| `<html lang>` | whether the `/-/en/` override won. If this isn't an `en` variant, the page came back native and the native tables are what's doing the work. |
+| `page kind` | whether this is a product page at all, vs. a homepage/CAPTCHA/interstitial. Answers "delivery block missing" vs. "we never got there". |
+| selector matrix | per selector: `ABSENT`, `PRESENT BUT EMPTY`, or the text found. **`PRESENT BUT EMPTY` is the signature of the client-side-injection problem** — the container rendered, its contents hadn't been filled in when we read the page. That means "wait longer", not "wrong selector". |
+| `[diagnostic]` date-like strings | every date anywhere on the page, with context and a plausible/implausible verdict. Diagnostic only — nothing acts on these. If a real delivery date shows up here but the result was `UNKNOWN`, the selector list is the problem, not the date parsing. |
+| `[diagnostic]` delivery wording | what the page's delivery copy literally says, which is what you need to fix a selector or a phrase list. |
+
+At the end of each market: an `OUTCOMES` tally, and after all markets a
+`HIT RATE BY MARKET` scoreboard. That scoreboard line is the thing to
+compare between runs when judging whether a change helped.
+
+Locally the same flag works:
+
+```bash
+python pilot/eu_multimarket/track_delivery_multi.py de es --debug
+HEADLESS=false python pilot/eu_multimarket/track_delivery_multi.py de --debug  # watch it
+```
+
 ## Page language — read this before touching `marketplaces.py`
 
 Product URLs use Amazon's `/-/en/` language-override path segment, so

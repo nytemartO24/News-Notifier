@@ -140,6 +140,19 @@ Locale-specific `no_date_signals`/`out_of_stock_signals` phrase lists in
 `marketplaces.py` are still best-effort translations for every market
 except `se`, unverified beyond whatever's been checked in this session.
 
+**Debug logging**: `--debug` / `DEBUG=true` (the test workflow's `debug`
+input, default on) logs a full page snapshot per product — `<html lang>`
+(did the `/-/en/` override win?), a page-kind matrix (product page vs.
+homepage/CAPTCHA), a per-selector `ABSENT` / `PRESENT BUT EMPTY` /
+text-found matrix (**`PRESENT BUT EMPTY` is the client-side-injection
+signature** — wait longer, don't change the selector), plus
+diagnostic-only whole-page scans showing every date-like string and the
+page's actual delivery wording. Without `--debug` the same snapshot is
+still emitted for every `UNKNOWN`. Per-market `OUTCOMES` tally and a
+final `HIT RATE BY MARKET` scoreboard — that's the line to diff between
+runs. All of this goes to the job log deliberately, because the artifact
+usually can't be downloaded (see below).
+
 ### On-demand GitHub Actions test runner
 
 `.github/workflows/pilot-eu-multimarket-test.yml` — `workflow_dispatch`
