@@ -517,53 +517,65 @@ def is_amazon_seller(seller_text: str):
     return "amazon" in seller_text.lower()
 
 
-def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
-    logger.info(f"[{market}]   navigating to {url}")
+def safe_goto(page, url: str, market: str) -> None:
+    """Navigate, tolerate Amazon's spurious download prompt, then settle
+    the page (cookie banner + any chained interstitial).
+
+    Every navigation must go through this. The retry path below used to
+    call page.goto() directly, and a real run showed exactly why that
+    was wrong: two .se products hit "Page.goto: Download is starting" on
+    the retry, which propagated out and killed the item as an ERROR even
+    though the initial navigation had handled the identical condition
+    fine three times in the same run.
+    """
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except Exception as e:
         # Amazon occasionally triggers a spurious download prompt on
         # navigation (seen live: "Download is starting") — the catalog
-        # scraper already tolerates this (safe_goto); the delivery
-        # tracker didn't, so one flaky nav crashed the item AND cascaded
-        # into "navigation interrupted" errors for every item after it,
-        # since the aborted goto left the page mid-transition.
+        # scraper already tolerates this; the delivery tracker didn't,
+        # so one flaky nav crashed the item AND cascaded into
+        # "navigation interrupted" errors for every item after it, since
+        # the aborted goto left the page mid-transition.
         if "Download is starting" in str(e):
             logger.info(f"[{market}]   navigation triggered a spurious download prompt, continuing anyway")
             page.wait_for_timeout(1000)
         else:
             raise
-    logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
+
     page.wait_for_timeout(2000)
-
     dismiss_cookie_banner(page, market)
-
     for attempt in range(2):
         if not dismiss_continue_shopping_interstitial(page, market):
             break
         logger.info(f"[{market}]   re-checking for a chained interstitial (attempt {attempt + 1}/2)")
 
+
+def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
+    logger.info(f"[{market}]   navigating to {url}")
+    safe_goto(page, url, market)
+    logger.info(f"[{market}]   page loaded (domcontentloaded), settling...")
+
     # A debug dump captured for .se ASIN B0G4NF8QDZ turned out to be the
     # plain Amazon.se homepage (title "Amazon.se: Low Prices...",
     # canonical "/-/en/", zero occurrences of the ASIN anywhere in the
     # HTML) — proof a goto can silently land somewhere other than the
-    # product page (most likely a prior item's "Download is starting"
-    # navigation bleeding into this one on the shared page/context) and
-    # get read downstream as "delivery block just isn't there" instead of
-    # "we're not even on the right page." Catch that explicitly rather
-    # than inferring it from missing selectors after the fact.
-    current_url = page.url
-    if asin not in current_url:
-        logger.warning(f"[{market}]   landed on {current_url!r} instead of the product page for {asin} — retrying navigation once")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-        for attempt in range(2):
-            if not dismiss_continue_shopping_interstitial(page, market):
-                break
-        current_url = page.url
-        if asin not in current_url:
-            logger.warning(f"[{market}]   still on {current_url!r} after retry — giving up on {asin} for this pass")
-            return {"date": "UNKNOWN — navigation didn't reach the product page", "seller_text": "", "is_amazon_seller": None}
+    # product page and get read downstream as "delivery block just isn't
+    # there" instead of "we're not even on the right page". A real run
+    # also produced 'chrome-error://chromewebdata/' here, the aftermath
+    # of an aborted download-prompt navigation. Catch both explicitly
+    # rather than inferring them from missing selectors after the fact.
+    for attempt in range(1, 3):
+        if asin in page.url:
+            break
+        logger.warning(
+            f"[{market}]   landed on {page.url!r} instead of the product page for {asin} "
+            f"— retrying navigation ({attempt}/2)"
+        )
+        safe_goto(page, url, market)
+    else:
+        logger.warning(f"[{market}]   still on {page.url!r} after 2 retries — giving up on {asin} for this pass")
+        return {"date": "UNKNOWN — navigation didn't reach the product page", "seller_text": "", "is_amazon_seller": None}
 
     # Delivery/seller blocks are often injected client-side via JS after
     # domcontentloaded — confirmed via a real .de page's raw server HTML,
@@ -596,6 +608,45 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
 
     if DEBUG:
         emit_diagnostics(logger.info)
+
+    # Amazon can serve an "international shopping" variant of a product
+    # page when it geolocates the visitor outside the marketplace's
+    # country. Observed live on amazon.de from a US-based GitHub Actions
+    # runner: all 8 products came back with an "International Shopping
+    # Transition Alert ... we are showing you items that dispatch to
+    # United States" banner, no add-to-cart, no price block, an empty
+    # #availability — and, on the three that did render a delivery
+    # block, prices and dates quoted in USD for shipping to the US.
+    #
+    # Those USD dates are real dates, but they are the wrong ones: they
+    # describe international shipping to the runner's country, not what
+    # a local customer sees. Storing one would be precisely the
+    # confident-but-wrong result this scraper is supposed to avoid — and
+    # it would become the baseline a future "moved earlier" alert fires
+    # against. Report it as UNKNOWN (state preserved, no alert) and say
+    # why, loudly.
+    #
+    # This is an artefact of WHERE the scraper runs, not a bug: on the
+    # European VPS this pilot is destined for, it shouldn't trigger at
+    # all. Detected rather than worked around, because faking a delivery
+    # location is fragile and would hide the fact that a run's numbers
+    # aren't comparable to a local one's.
+    page_text_lower = soup.get_text(" ", strip=True).lower()
+    if "international shopping transition alert" in page_text_lower:
+        logger.warning(
+            f"[{market}] {asin}: page served in INTERNATIONAL SHOPPING mode — Amazon geolocated "
+            f"this run outside {config['domain']}'s country, so any date here is an "
+            f"international-shipping estimate to the runner's location, not the local one. "
+            f"Not trusting it. (Expected on GitHub Actions' US runners; should not happen "
+            f"from an EU host.)"
+        )
+        if not DEBUG:
+            emit_diagnostics(logger.warning)
+        return {
+            "date": "UNKNOWN — international-shopping page, date not representative",
+            "seller_text": "",
+            "is_amazon_seller": None,
+        }
 
     seller_text = fetch_seller_info(soup)
     amazon_seller = is_amazon_seller(seller_text)

@@ -90,7 +90,7 @@ Also detects **Amazon vs. third-party seller** per listing
 from both an Amazon-sold and a Skydigital-sold listing) so you can tell a
 fair Amazon-set price from a marketplace/scalper price.
 
-**Page language — the big one, fixed but not yet re-verified**: product
+**Page language — the big one, fixed and now verified live**: product
 URLs use the `/-/en/` override, so pages render in **English**, but every
 market except `se` declared only *native* month names and signal phrases
 in `marketplaces.py` — so nothing could match. `se` was the sole market
@@ -100,10 +100,12 @@ tables could match 12/12 months for `se`, 6/12 for `de`, 4/12 for
 `nl`/`be`, and **0/12 for `fr`/`es`/`it`/`pl`** — which tracks the
 observed hit rates closely. Fixed by merging shared English tables into
 every market (`_merge()` in `marketplaces.py`) and pinning `locale` to
-`en-<CC>` so Accept-Language stops fighting the URL. `de`'s 6/12 doesn't
-fully explain its 0/8, so the client-side-injection issue below is a real
-second factor there. Don't "simplify" a market back down to native-only
-tables.
+`en-<CC>` so Accept-Language stops fighting the URL. (`de`'s 6/12 didn't
+fully explain its 0/8 — the live run identified the missing factor as
+the international-shopping artefact described below, not a parsing
+problem.) Don't "simplify" a market back down to native-only tables:
+`pl` proves the native side still matters, since Poland ignores the
+`/-/en/` override and serves `pl-pl`.
 
 Also fixed alongside it, all in the same direction (fewer confident-but-wrong
 results): date parsing now handles month-first order, abbreviations,
@@ -117,28 +119,57 @@ delivery block hasn't rendered" into a confident wrong `NO DATE YET`); and
 the EU cookie-consent banner (`#sp-cc-accept`) is dismissed, which
 production never had to handle because its VPS browser profile is warm.
 
-**Known reliability issue, actively being debugged**: a full 8-market ×
-8-ASIN GitHub Actions test run (see below) found only `.se` reliably
-returns real delivery dates (5/8) with correct seller detection (5/5 of
-those hits). Every other market got 0-1/8 real matches; `de`/`es`/`it`/`pl`
-got zero. No crashes, no bot-blocking, no CAPTCHAs anywhere — homepage
-warm-up and interstitial dismissal succeeded on every market. Root cause
-(confirmed via a real `.de` product page's raw server HTML, provided by the
-user): the delivery/seller info blocks are injected **client-side via JS
-after `domcontentloaded`** on at least some markets, and aren't present in
-the initial server HTML at all — even though it's a completely normal,
-purchasable listing (Add-to-Cart, buybox all present). A fixed 2-second
-sleep isn't always enough (even `.se` had 3/8 `UNKNOWN` in that same run).
-Fix in progress: `fetch_delivery_date()` now does an adaptive
-`page.wait_for_selector()` (up to 6s) for any target selector to appear
-before reading page content, instead of relying solely on the fixed sleep.
-**Not yet re-verified** — next step is rerunning the GitHub Actions test
-workflow and confirming the hit rate improves, especially on `de`/`es`/
-`it`/`pl`.
+**Verified live** (run 30803204143, 2026-08-03, 8 markets x 8 ASINs,
+`--debug`). The language fix is confirmed correct by direct evidence:
+`<html lang>` came back **`en-gb` on every market except `pl`** (which
+served `pl-pl`, ignoring the `/-/en/` override) — so the old
+native-only tables genuinely could not have matched, and `pl`'s hits
+came via the genitive Polish months added alongside. Hit rates went
+from `se` 5/8 and everything else 0-1/8, to:
 
-Locale-specific `no_date_signals`/`out_of_stock_signals` phrase lists in
-`marketplaces.py` are still best-effort translations for every market
-except `se`, unverified beyond whatever's been checked in this session.
+| market | real dates | unresolved (UNKNOWN) |
+|---|---|---|
+| `se` | 6/8 | 0 |
+| `nl` | 6/8 | 0 |
+| `de` | 3/8 | 4 — all the international-shopping artefact below |
+| `pl` | 3/8 | 0 |
+| `be` | 3/8 | 2 |
+| `fr` / `es` / `it` | 2/8 | 2 / 1 / 2 |
+
+Every market now returns real dates. Most non-hits are legitimate
+states, not failures: 53 of 64 pages produced a definite verdict
+(`currently unavailable` -> NO DATE YET x11, `temporarily out of stock`
+x8, and `obecnie niedostepny` x5 — a *guessed* Polish phrase that turned
+out correct). Zero implausible-date rejections; the cookie banner was
+accepted once per market (production never had to handle it); the
+`[data-csa-c-content-id="DEXUnifiedCXPDM"]` selector added in the same
+change is doing real work, including on the Polish pages.
+
+**`amazon.de` + a non-EU host = international-shopping mode.** All 8
+`.de` pages carried an "International Shopping Transition Alert ... items
+that dispatch to United States" banner, with no add-to-cart, no price
+block, an empty `#availability`, and — on the three that did render a
+delivery block — prices and dates in **USD for shipping to the US**.
+Those are real dates describing the wrong thing. `fetch_delivery_date()`
+now detects the banner and returns UNKNOWN rather than storing a date
+that would become the baseline for a bogus "moved earlier" alert. This
+is an artefact of *where the run happens*, not a bug: it should not
+occur from the European VPS. It is detected rather than worked around,
+because faking a delivery location is fragile and would hide the fact
+that a run's numbers aren't comparable to a local one's. **A GitHub
+Actions run is therefore not a substitute for a run from an EU host,
+especially for `de`.**
+
+The earlier client-side-injection theory is not contradicted, but it
+was never the main event: the remaining `de` failures are `ABSENT`
+delivery blocks on offer-less international pages, not `PRESENT BUT
+EMPTY` ones. The adaptive `wait_for_selector` stays.
+
+Native-language `no_date_signals`/`out_of_stock_signals` in
+`marketplaces.py` are still best-effort translations, but they now sit
+behind verified English phrasing as a fallback rather than being the
+only thing between a page and `UNKNOWN`. Only one has been confirmed to
+fire against a real page so far: `pl`'s `obecnie niedostępny` (5 hits).
 
 **Debug logging**: `--debug` / `DEBUG=true` (the test workflow's `debug`
 input, default on) logs a full page snapshot per product — `<html lang>`

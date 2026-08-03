@@ -105,12 +105,33 @@ header agrees with the URL instead of fighting it. Whichever language
 Amazon actually serves, it parses. If you add a market, add its native
 tables — the English ones are merged in for you by `_merge()`.
 
-`de` at 6/12 does not fully explain its 0/8, so at least one other
-factor was in play there (consistent with the real `.de` server HTML
-showing no delivery block at all — see the client-side-injection note in
-the root `CLAUDE.md`). The adaptive `wait_for_selector` and the cookie
-banner dismissal are the mitigations for that half; they still need a
-real run to confirm.
+**Confirmed live** (run 30803204143): `<html lang>` came back `en-gb` on
+every market except `pl`, which serves `pl-pl` and ignores the override
+entirely — so the English tables do the work almost everywhere, and the
+native tables are what rescue Poland. Don't remove either side.
+
+`de`'s remaining shortfall turned out not to be a parsing problem at
+all — see the geolocation warning below.
+
+## `amazon.de` from a non-EU host: international-shopping mode
+
+In that same run, all 8 `.de` pages carried an "International Shopping
+Transition Alert … items that dispatch to United States" banner (the
+runner is US-based), with no add-to-cart, no price block, an empty
+`#availability`, and — on the three that rendered a delivery block —
+prices and dates **in USD, for shipping to the US**. Those are real
+dates describing the wrong thing.
+
+`fetch_delivery_date()` detects that banner and returns `UNKNOWN`
+instead of storing the date, because storing it would set the baseline
+for a bogus "moved earlier" alert later. It is *detected*, not worked
+around: faking a delivery location is fragile, and silently papering
+over it would hide the fact that such a run's numbers aren't comparable
+to a local one's.
+
+**So: a GitHub Actions run is not a substitute for a run from an EU
+host, especially for `de`.** Use Actions to check parsing logic; use the
+VPS to judge real hit rates.
 
 ## Known unknowns (why this is a pilot and not a rollout)
 
