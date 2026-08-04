@@ -190,19 +190,17 @@ Nuremberg, Amsterdam, Brussels, Warsaw) while `fr`/`es`/`it` all got
 "Deliver to Germany" (the VPS's own country) and served offer-less
 cross-border pages. `set_delivery_location()` now pins
 `DELIVERY_COUNTRY`/`DELIVERY_POSTCODE` (default Sweden / 11164) on every
-market after warm-up, via Amazon's glow widget. The modal differs by
-market, from real markup: `de`/`fr`/`es` have a native
-`<select id="GLUXCountryList">` (242+ options — *not* a list of links;
-the styled `<ul role="listbox">` is a separate element existing only
-once opened) plus a single 5-char `#GLUXZipUpdateInput`. **`amazon.se`
-has no country picker at all** (you can't ask your own country's site to
-ship abroad) and splits the postcode across **two** fields,
-`#GLUXZipUpdateInput_0` (maxlength 3) + `_1` (2), for `371 16`. So the
-code tries the country picker, then falls back to the postcode —
-landing on the right mechanism for both without special-casing markets.
-`fill_postcode()` splits by each field's own `maxlength` and sorts on
-the `_N` suffix (filling those backwards would yield a different,
-valid-looking postcode rather than an error). Success is confirmed by
+market after warm-up. **The mechanism is decided by the market, with no
+cross-fallback**: `se` always uses the postcode (its modal has no
+country picker at all, and splits the code across two fields,
+`#GLUXZipUpdateInput_0` maxlength 3 + `_1` maxlength 2, for `371 16`);
+`de`/`fr`/`es` always use the country picker, a native
+`<select id="GLUXCountryList">` with 242-250 options — *not* a list of
+links, the styled `<ul role="listbox">` is a separate element existing
+only once opened. Neither mechanism can do the other's job (the foreign
+markets' postcode fields are validated against their own country), so
+falling back between them could only turn a clear failure into a
+confusing one. Success is confirmed by
 `#GLUXConfirmClose` becoming visible (it starts hidden inside
 `#GLUXHiddenSuccessDialog`). Failure is non-fatal but logs `DELIVERY
 LOCATION NOT APPLIED`; any market showing that is not comparable to the
