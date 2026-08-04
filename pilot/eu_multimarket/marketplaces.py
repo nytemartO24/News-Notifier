@@ -79,6 +79,7 @@ ENGLISH_OUT_OF_STOCK_SIGNALS = [
 _MARKETPLACES = {
     "se": {
         "domain": "amazon.se",
+        "flag": "🇸🇪",
         "country": "Sweden",
         "locale": "en-SE",
         "native_months": {
@@ -94,6 +95,7 @@ _MARKETPLACES = {
     },
     "de": {
         "domain": "amazon.de",
+        "flag": "🇩🇪",
         "country": "Germany",
         "locale": "en-DE",
         "native_months": {
@@ -111,6 +113,7 @@ _MARKETPLACES = {
     },
     "fr": {
         "domain": "amazon.fr",
+        "flag": "🇫🇷",
         "country": "France",
         "locale": "en-FR",
         "native_months": {
@@ -128,6 +131,7 @@ _MARKETPLACES = {
     },
     "es": {
         "domain": "amazon.es",
+        "flag": "🇪🇸",
         "country": "Spain",
         "locale": "en-ES",
         "native_months": {
@@ -146,6 +150,7 @@ _MARKETPLACES = {
     },
     "nl": {
         "domain": "amazon.nl",
+        "flag": "🇳🇱",
         "country": "Netherlands",
         "locale": "en-NL",
         "native_months": {
@@ -164,6 +169,7 @@ _MARKETPLACES = {
     "be": {
         # Amazon Belgium's actual domain, not amazon.be.
         "domain": "amazon.com.be",
+        "flag": "🇧🇪",
         "country": "Belgium",
         "locale": "en-BE",
         # Belgium's site is bilingual, so both Dutch and French month
@@ -186,6 +192,7 @@ _MARKETPLACES = {
     },
     "it": {
         "domain": "amazon.it",
+        "flag": "🇮🇹",
         "country": "Italy",
         "locale": "en-IT",
         "native_months": {
@@ -203,6 +210,7 @@ _MARKETPLACES = {
     },
     "pl": {
         "domain": "amazon.pl",
+        "flag": "🇵🇱",
         "country": "Poland",
         "locale": "en-PL",
         # Polish dates decline the month into the genitive — a date is

@@ -73,6 +73,7 @@ from browser import (
     open_market,
     safe_goto,
 )
+import alerts
 from logging_setup import setup_logger
 from marketplaces import ENGLISH_MONTHS, MARKETPLACES
 
@@ -335,6 +336,19 @@ def log_text_probes(market: str, soup, date_pattern: re.Pattern, config: dict, l
 # reported honestly as "seller unknown".
 SELLER_CONTAINER_SELECTOR = "#merchantInfoFeature_feature_div"
 
+# The featured offer's price. Deliberately NOT a bare ".a-price
+# .a-offscreen": a product page is full of prices — "similar items"
+# carousels, sponsored rows, "customers also bought" — and any of them
+# would look like a plausible price while belonging to a different
+# product entirely. Each of these is the buybox's own price container.
+PRICE_SELECTORS = [
+    "#corePriceDisplay_desktop_feature_div .a-offscreen",
+    "#corePrice_feature_div .a-offscreen",
+    "#apex_desktop .a-offscreen",
+    "#priceblock_ourprice",
+    "#priceblock_dealprice",
+]
+
 MAX_NAME_LENGTH = 40
 
 logger = setup_logger("delivery_multi")
@@ -457,6 +471,17 @@ def fetch_seller_info(soup) -> str:
     return ""
 
 
+def fetch_price(soup) -> str:
+    """The featured offer's price, or "" when there's no offer to price."""
+    for selector in PRICE_SELECTORS:
+        el = soup.select_one(selector)
+        if el:
+            text = " ".join(el.get_text(strip=True).split())
+            if text:
+                return text
+    return ""
+
+
 def is_amazon_seller(seller_text: str):
     """True/False/None (unknown, no seller block found at all). Since
     seller_text comes from the seller-specific container (or its clean
@@ -517,7 +542,10 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
         safe_goto(page, url, market)
     else:
         logger.warning(f"[{market}]   still on {page.url!r} after 2 retries — giving up on {asin} for this pass")
-        return {"date": "UNKNOWN — navigation didn't reach the product page", "seller_text": "", "is_amazon_seller": None}
+        return {
+            "date": "UNKNOWN — navigation didn't reach the product page",
+            "seller_text": "", "is_amazon_seller": None, "price": "",
+        }
 
     # Delivery/seller blocks are often injected client-side via JS after
     # domcontentloaded — confirmed via a real .de page's raw server HTML,
@@ -595,8 +623,7 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
                 emit_diagnostics(logger.warning)
             return {
                 "date": f"UNKNOWN — page dispatches to {shipping_to or 'an unknown country'}, not {DELIVERY_COUNTRY}",
-                "seller_text": "",
-                "is_amazon_seller": None,
+                "seller_text": "", "is_amazon_seller": None, "price": "",
             }
 
     seller_text = fetch_seller_info(soup)
@@ -606,8 +633,17 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
     else:
         logger.info(f"[{market}]   no seller/dispatch block found (normal when there is no offer)")
 
+    price = fetch_price(soup)
+    if price:
+        logger.info(f"[{market}]   price: {price}")
+
     def result(date: str) -> dict:
-        return {"date": date, "seller_text": seller_text, "is_amazon_seller": amazon_seller}
+        return {
+            "date": date,
+            "seller_text": seller_text,
+            "is_amazon_seller": amazon_seller,
+            "price": price,
+        }
 
     text_blob = ""
     matched_selector = None
@@ -743,14 +779,14 @@ def truncate_name(name: str) -> str:
     return name if len(name) <= MAX_NAME_LENGTH else name[: MAX_NAME_LENGTH - 1].rstrip() + "…"
 
 
-def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
+def check_market(market: str, asins: list[str]) -> tuple[dict, dict]:
     config = MARKETPLACES[market]
     market_dir = PILOT_DIR / "state" / market
     market_dir.mkdir(parents=True, exist_ok=True)
     state_file = market_dir / "delivery_state.json"
 
     if not asins:
-        return {}
+        return {}, {}
 
     logger.info(f"=== [{market}] Checking {len(asins)} product(s) ===")
 
@@ -759,6 +795,9 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
     # judged on, and it's tedious to count by hand from the log.
     outcomes = {"real date": 0, "NO DATE YET": 0, "OUT OF STOCK": 0, "NO OFFER": 0,
                 "NOT DELIVERABLE": 0, "UNKNOWN": 0, "ERROR": 0}
+    # Per-ASIN detail for this market, consumed by the alerting pass once
+    # every market has been checked.
+    findings: dict[str, dict] = {}
     # ASINs this pass actually got a fresh answer for, so the summary
     # can distinguish them from carried-over state (see below).
     refreshed: set[str] = set()
@@ -838,35 +877,34 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
             else:
                 outcomes["real date"] += 1
 
+            # Notifying happens after every market has been checked, so
+            # one ASIN improving on two markets is one message rather
+            # than two. Record what the comparison will need.
             previous_date = state.get(asin, {}).get("date")
-            if previous_date is not None and current_date != previous_date:
-                old_parsed = parse_date_for_sorting(previous_date, config["months"])
-                new_parsed = parse_date_for_sorting(current_date, config["months"])
-                became_earlier_or_new = new_parsed is not None and (
-                    old_parsed is None or new_parsed < old_parsed
-                )
-                if became_earlier_or_new:
-                    seller_line = (
-                        f"  seller: {seller_text}"
-                        + (" ⚠️ NOT sold by Amazon" if is_amazon is False else "")
-                        + "\n"
-                        if seller_text
-                        else ""
-                    )
-                    notify(
-                        f"📦 [{market.upper()}] Delivery date moved earlier for **{name}**:\n"
-                        f"  was: {previous_date}\n"
-                        f"  now: {current_date}\n"
-                        f"{seller_line}"
-                        f"  {url}",
-                        send_discord,
-                    )
+            old_parsed = parse_date_for_sorting(previous_date or "", config["months"])
+            new_parsed = parse_date_for_sorting(current_date, config["months"])
+            findings[asin] = {
+                "market": market,
+                "flag": config["flag"],
+                "domain": config["domain"],
+                "name": name,
+                "previous": previous_date,
+                "current": current_date,
+                "price": result["price"],
+                "sort_key": new_parsed,
+                # "Improved" is any move closer, including gaining a date
+                # where there wasn't one. Both get the NEW! tag and both
+                # get their link stacked on the alert.
+                "improved": new_parsed is not None
+                and (old_parsed is None or new_parsed < old_parsed),
+            }
 
             state[asin] = {
                 "name": name,
                 "date": current_date,
                 "seller_text": seller_text,
                 "is_amazon_seller": is_amazon,
+                "price": result["price"],
             }
 
         logger.info(f"[{market}] closing browser")
@@ -915,7 +953,44 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
             f"same snapshot for the products that DID resolve, for comparison."
         )
 
-    return outcomes
+    return outcomes, findings
+
+
+def send_delivery_alerts(findings_by_market: dict, send_discord: bool) -> int:
+    """One message per ASIN that improved anywhere, listing every market.
+
+    Runs after all markets are checked rather than inside the per-market
+    loop, so an ASIN that improves on two markets in the same run
+    produces one message showing both instead of two you have to join up
+    mentally. The trade-off: if a later market crashes, its lines are
+    simply absent from the message rather than the earlier market's
+    alert having already gone out — so the message reflects whatever
+    completed, and the log records the failure.
+    """
+    asins = {asin for findings in findings_by_market.values() for asin in findings}
+    alerted = 0
+
+    for asin in sorted(asins):
+        rows = [
+            findings[asin] for findings in findings_by_market.values() if asin in findings
+        ]
+        improved = [row for row in rows if row["improved"]]
+        if not improved:
+            continue
+
+        # Any market's name will do — it's the same product; prefer one
+        # that improved, since that listing is the one being pointed at.
+        name = improved[0]["name"]
+        message = alerts.format_delivery_alert(asin, name, rows)
+        logger.info(
+            f"ALERT {asin}: improved on {', '.join(row['market'] for row in improved)}"
+        )
+        notify(message, send_discord)
+        alerted += 1
+
+    if not alerted:
+        logger.info("No delivery dates moved earlier this run — nothing to notify.")
+    return alerted
 
 
 if __name__ == "__main__":
@@ -947,11 +1022,14 @@ if __name__ == "__main__":
             logger.info("Nothing to track — exiting.")
         else:
             per_market = {}
+            findings_by_market = {}
             for market in args.markets:
                 if market not in MARKETPLACES:
                     logger.error(f"Unknown market '{market}' — choices are {list(MARKETPLACES)}")
                     continue
-                per_market[market] = check_market(market, tracked_asins, args.send_discord)
+                per_market[market], findings_by_market[market] = check_market(market, tracked_asins)
+
+            send_delivery_alerts(findings_by_market, args.send_discord)
 
             # Cross-market scoreboard. This is the line to compare
             # between runs when judging whether a change helped — the
