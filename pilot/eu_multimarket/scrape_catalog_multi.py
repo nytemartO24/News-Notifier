@@ -51,6 +51,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).parent))
+import alerts
 import browser
 from browser import load_asin_set, notify, open_market, safe_goto
 from logging_setup import setup_logger
@@ -226,12 +227,7 @@ def check_market(market: str, send_discord: bool) -> dict:
 
     logger.info(f"[{market}] {len(new)} NEW product(s)")
     for i, product in enumerate(new):
-        price = f"  {product['price']}" if product["price"] else ""
-        message = (
-            f"🆕 [{market.upper()}] New Beyblade X product on {config['domain']}:\n"
-            f"  **{product['title'][:150]}**{price}\n"
-            f"  https://www.{config['domain']}/dp/{product['asin']}"
-        )
+        message = alerts.format_new_product_alert(market, config, product)
         if i < MAX_DISCORD_MESSAGES:
             notify(message, send_discord)
         else:
