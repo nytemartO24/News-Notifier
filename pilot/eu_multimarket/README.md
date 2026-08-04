@@ -63,25 +63,24 @@ DELIVERY_COUNTRY=Sweden DELIVERY_POSTCODE=37116 \
   python pilot/eu_multimarket/track_delivery_multi.py
 ```
 
-The modal differs per market, confirmed from real markup:
+Which mechanism is used is decided by the market, not discovered by
+trying things — both verified live:
 
-| | `.de` / `.fr` / `.es` | `.se` |
+| | `.se` (domestic) | `.de` / `.fr` / `.es` |
 |---|---|---|
-| country picker | native `<select id="GLUXCountryList">`, 242+ options | **absent entirely** |
-| postcode field | one `#GLUXZipUpdateInput`, maxlength 5 | **two** — `#GLUXZipUpdateInput_0` (3) + `_1` (2), for `371 16` |
+| mechanism | **postcode**, always | **country = Sweden**, always |
+| country picker | absent entirely | native `<select id="GLUXCountryList">`, 242-250 options |
+| postcode field | **two** inputs, `#GLUXZipUpdateInput_0` (3) + `_1` (2), for `371 16` | one, but validated against *that* country — can't express Sweden |
 
-So there is no "ship to Sweden" option on `amazon.se` — you can't ask
-your own country's site to deliver abroad, and the modal only offers
-sign-in or a Swedish postcode. That's fine: a postcode is *more*
-precise than a country. The code tries the country picker first and
-falls back to the postcode, which lands on the right mechanism for both
-shapes without special-casing markets.
+There is deliberately **no cross-fallback** between the two. Neither
+mechanism can do the other's job — `.se` has no country picker, and the
+others' postcode fields reject a Swedish code — so "try the other one"
+could only ever turn a clear failure into a confusing one.
 
-`fill_postcode()` splits the postcode across however many fields a
-market uses, by reading each field's own `maxlength` rather than
-hardcoding 3/2, and sorts on the `_N` id suffix rather than trusting DOM
-order — filling those two inputs backwards would silently produce a
-different, valid-looking postcode instead of an error.
+`fill_postcode()` distributes the digits across however many fields the
+modal has, by each field's own `maxlength`, sorting on the `_N` id
+suffix rather than trusting DOM order: filling those two backwards would
+silently produce a different but structurally valid postcode.
 
 It never raises. If it can't apply the location, the run continues and
 logs **`DELIVERY LOCATION NOT APPLIED`** — treat any market with that

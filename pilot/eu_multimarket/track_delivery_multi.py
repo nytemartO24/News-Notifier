@@ -18,10 +18,17 @@ marketplaces.py). Standalone pilot: reads/writes only under
 pilot/eu_multimarket/state/ — does NOT touch scripts/delivery_state.json
 or any production state.
 
-NO_DATE_SIGNALS / OUT_OF_STOCK_SIGNALS for every market except "se" are
-unverified guesses (see marketplaces.py) — expect "UNKNOWN" results and
-debug_*.html dumps under state/<market>/ until those are tuned from real
-output.
+Every market is pinned to one delivery destination (see
+set_delivery_location) so their dates mean the same thing and are
+comparable to each other.
+
+Outcomes, in decreasing order of usefulness: a real date; OUT OF STOCK;
+NO DATE YET; NOT DELIVERABLE (this market won't dispatch to the
+destination); NO OFFER (no featured offer at all). For a whitelist of
+rare, frequently-unavailable items those non-date states are the normal
+answer, not a failure — UNKNOWN is the only outcome that means the
+scraper didn't understand a page, and it dumps state/<market>/debug_*.html
+plus a full snapshot to the log when it happens.
 
 Logs every step per product (navigation, interstitial handling, which
 selector/signal matched, elapsed time) to logs/delivery_multi.log and the
@@ -32,12 +39,17 @@ product.
 Usage:
     python pilot/eu_multimarket/track_delivery_multi.py [market ...]
     # reads ASINs from state/whitelist.txt (create/edit it by hand) and
-    # checks that same list against every named market (default: all
-    # configured markets)
+    # checks that same list against every named market
+    # (default: se de fr es; nl be it pl are configured and runnable
+    # by name)
 
 Env vars:
-    HEADLESS   "true" (default) or "false" — set false to watch the
-               browser locally while debugging a stuck/slow market
+    HEADLESS           "true" (default) or "false" — set false to watch
+                       the browser locally while debugging a market
+    DELIVERY_COUNTRY   destination country (default Sweden)
+    DELIVERY_POSTCODE  destination postcode, used on the domestic market
+                       only (default 37116)
+    DEBUG              "true" for a page snapshot on every product
 """
 
 import argparse
@@ -53,47 +65,24 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 sys.path.insert(0, str(Path(__file__).parent))
+import browser
+from browser import (
+    DELIVERY_COUNTRY,
+    load_asin_set,
+    notify,
+    open_market,
+    safe_goto,
+)
 from logging_setup import setup_logger
 from marketplaces import ENGLISH_MONTHS, MARKETPLACES
 
 PILOT_DIR = Path(__file__).parent
 WHITELIST_FILE = PILOT_DIR / "state" / "whitelist.txt"  # hand-maintained, shared across all markets
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "")
-HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
 # Verbose per-product page diagnostics. Set by --debug or DEBUG=true.
 # Reassigned in __main__ once the CLI flag is parsed.
 DEBUG = os.environ.get("DEBUG", "").lower() == "true"
 
-# Where we're pretending to be, for delivery-estimate purposes.
-#
-# This is not cosmetic. A delivery date only means anything relative to a
-# destination, and Amazon picks one by geolocation if you don't tell it —
-# which produced a genuinely useless run on 2026-08-04: se/de/nl/be/pl
-# each resolved to a local address (Stockholm, Nuremberg, Amsterdam,
-# Brussels, Warsaw) while fr/es/it all resolved to "Deliver to Germany"
-# (the VPS's own country) and served offer-less cross-border pages. So no
-# two markets were answering the same question, and only .se was
-# answering the one that matters: "when would this arrive at MY address".
-#
-# Pinning one destination across every market makes the numbers
-# comparable and makes "is it cheaper/sooner from .de than .se?" a
-# question the pilot can actually answer.
-# Only the domestic market can take a postcode (amazon.se's modal has no
-# country picker at all — see select_country); everywhere else Amazon
-# quotes country-level estimates only. Written without the space that
-# Swedish postcodes normally carry ("371 16"); fill_postcode() splits it
-# across however many input fields the market's modal uses.
-DELIVERY_COUNTRY = os.environ.get("DELIVERY_COUNTRY", "Sweden")
-DELIVERY_POSTCODE = os.environ.get("DELIVERY_POSTCODE", "37116")
 
-# Amazon's "Deliver to ..." location widget ("glow").
-GLOW_INGRESS_SELECTOR = "#glow-ingress-line2"
-GLOW_OPENER_SELECTORS = [
-    "#nav-global-location-popover-link",
-    "#glow-ingress-block",
-    GLOW_INGRESS_SELECTOR,
-]
 
 # Markets checked when none are named on the command line. The other
 # four (nl, be, it, pl) stay fully configured in marketplaces.py and can
@@ -274,9 +263,8 @@ def log_page_snapshot(market: str, asin: str, page, soup, html: str, log) -> Non
     for selector in AVAILABILITY_SELECTORS:
         log(f"[{market}]     {selector:<62} {describe_selector(soup, selector)}")
 
-    log(f"[{market}]   seller selectors:")
-    for selector in [SELLER_CONTAINER_SELECTOR] + SELLER_FALLBACK_SELECTORS:
-        log(f"[{market}]     {selector:<62} {describe_selector(soup, selector)}")
+    log(f"[{market}]   seller selector:")
+    log(f"[{market}]     {SELLER_CONTAINER_SELECTOR:<62} {describe_selector(soup, SELLER_CONTAINER_SELECTOR)}")
 
 
 def log_text_probes(market: str, soup, date_pattern: re.Pattern, config: dict, log) -> None:
@@ -338,21 +326,19 @@ def log_text_probes(market: str, soup, date_pattern: re.Pattern, config: dict, l
 # holds the actual seller name — "Amazon" when Amazon ships+sells
 # ("Shipper / Seller" label), or the third-party name when it doesn't
 # ("Sold by" label, e.g. "Skydigital"), regardless of which label wording
-# is shown. This replaced an earlier set of guessed selectors
-# (#merchant-info, #tabular-buybox, etc.) that don't exist in Amazon's
-# actual current markup at all — the fallbacks below are kept only in
-# case a market/layout genuinely differs; they remain unverified.
+# is shown. A set of guessed fallbacks (#merchant-info, #tabular-buybox,
+# #aod-offer-soldBy, #usedBuyBoxOOS) was removed: across every run they
+# produced a seller name exactly never, while #merchant-info repeatedly
+# showed up PRESENT BUT EMPTY — so as a fallback it could only ever have
+# contributed an empty or non-seller string to a field that decides
+# whether a price is Amazon's own. A missing seller block is already
+# reported honestly as "seller unknown".
 SELLER_CONTAINER_SELECTOR = "#merchantInfoFeature_feature_div"
-SELLER_FALLBACK_SELECTORS = [
-    "#merchant-info",
-    "#tabular-buybox",
-    "#aod-offer-soldBy",
-    "#usedBuyBoxOOS",
-]
 
 MAX_NAME_LENGTH = 40
 
 logger = setup_logger("delivery_multi")
+browser.use_logger(logger)
 
 
 # Ordinal/連 suffixes and connectors that sit between the day number and
@@ -433,38 +419,6 @@ def is_plausible_delivery_date(parsed) -> bool:
     return 0 <= (parsed - datetime.date.today()).days <= MAX_DELIVERY_HORIZON_DAYS
 
 
-def notify(message: str, send_discord: bool) -> None:
-    logger.info(message)
-    if not send_discord:
-        logger.info("[dry-run] would notify Discord (pass --send-discord to actually post)")
-        return
-    if not DISCORD_WEBHOOK_URL:
-        logger.warning("DISCORD_WEBHOOK_URL not set, skipping Discord post")
-        return
-    import requests
-
-    content = f"<@{DISCORD_USER_ID}> {message}" if DISCORD_USER_ID else message
-    try:
-        requests.post(
-            DISCORD_WEBHOOK_URL,
-            json={"content": content, "allowed_mentions": {"parse": ["users"]}},
-            timeout=10,
-        )
-    except requests.RequestException as e:
-        logger.warning(f"failed to send Discord notification: {e}")
-
-
-def load_asin_set(path: Path) -> set:
-    # A fully-commented line (leading '#') contributes no ASIN — that's
-    # how you pause tracking an item without deleting it.
-    if not path.exists():
-        return set()
-    result = set()
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        asin = line.strip().split("#")[0].strip()
-        if asin:
-            result.add(asin)
-    return result
 
 
 def load_whitelist() -> list[str]:
@@ -487,54 +441,6 @@ def load_whitelist() -> list[str]:
     return asins
 
 
-def dismiss_continue_shopping_interstitial(page, market: str) -> bool:
-    try:
-        if page.locator("form[action='/errors_page/validateCaptcha']").count() == 0:
-            return False
-        logger.info(f"[{market}]     interstitial detected — clicking through")
-        button = page.locator("form[action='/errors_page/validateCaptcha'] button[type='submit']")
-        if button.count() == 0:
-            logger.info(f"[{market}]     interstitial had no submit button, giving up on it")
-            return False
-        button.first.click()
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-        page.wait_for_timeout(1500)
-        logger.info(f"[{market}]     interstitial dismissed")
-        return True
-    except Exception as e:
-        logger.warning(f"[{market}]     interstitial dismissal failed: {e}")
-        return False
-
-
-def dismiss_cookie_banner(page, market: str) -> bool:
-    """Amazon's EU cookie-consent banner ('Accept'/'Alle akzeptieren').
-    Production never had to deal with it because the VPS's browser
-    profile is warm, but each pilot run starts from a blank context on a
-    market it has never visited. On some markets the banner is a
-    full-page interstitial rather than an overlay, in which case nothing
-    downstream can possibly find a delivery block until it's cleared."""
-    try:
-        button = page.locator("#sp-cc-accept")
-        if button.count() == 0:
-            return False
-        try:
-            # Short timeout: the default 30s is pure waste here. Seen
-            # live on amazon.com.be, where a "#redir-modal" backdrop sat
-            # over the banner and Playwright retried the click for the
-            # full 30 seconds before giving up.
-            button.first.click(timeout=5000)
-        except PlaywrightTimeoutError:
-            # The button is visible and enabled — something is just
-            # overlaying it. A DOM-level click ignores the overlay
-            # entirely, where a synthetic one can't.
-            logger.info(f"[{market}]     cookie banner click intercepted, clicking via DOM instead")
-            button.first.evaluate("el => el.click()")
-        page.wait_for_timeout(1000)
-        logger.info(f"[{market}]     cookie banner accepted")
-        return True
-    except Exception as e:
-        logger.warning(f"[{market}]     cookie banner dismissal failed: {e}")
-        return False
 
 
 def fetch_seller_info(soup) -> str:
@@ -548,11 +454,6 @@ def fetch_seller_info(soup) -> str:
         text = name_el.get_text(strip=True) if name_el else container.get_text(" ", strip=True)
         if text:
             return text
-
-    for selector in SELLER_FALLBACK_SELECTORS:
-        el = soup.select_one(selector)
-        if el and el.get_text(strip=True):
-            return el.get_text(" ", strip=True)
     return ""
 
 
@@ -587,258 +488,9 @@ def international_shopping_destination(page_text_lower: str) -> str:
     return " ".join(match.group(1).split()).title()
 
 
-def fill_postcode(page, market: str, postcode: str) -> bool:
-    """Type the postcode into the glow modal, whichever shape it takes.
-
-    Markets disagree on this, confirmed against real markup:
-
-      .de  one <input id="GLUXZipUpdateInput" maxlength="5">
-      .se  TWO inputs, #GLUXZipUpdateInput_0 (maxlength 3) and
-           #GLUXZipUpdateInput_1 (maxlength 2), matching how Swedish
-           postcodes are written ("371 16"). There is no singular
-           #GLUXZipUpdateInput on .se at all — waiting for one is what
-           made every .se run fail with an 8s timeout.
-
-    Split fields are filled by each input's own maxlength rather than a
-    hardcoded 3/2, so a market that splits differently still works.
-    """
-    digits = re.sub(r"\D", "", postcode)
-
-    single = page.locator("#GLUXZipUpdateInput")
-    if single.count():
-        single.first.fill(digits)
-        logger.info(f"[{market}]   filled postcode field with {digits}")
-        return True
-
-    fields = page.locator("[id^='GLUXZipUpdateInput_']")
-    count = fields.count()
-    if count == 0:
-        logger.warning(f"[{market}]   no postcode field in this modal")
-        return False
-
-    # DOM order should already be _0, _1, ... but sort on the id suffix
-    # rather than trust it — filling them out of order silently produces
-    # a wrong postcode instead of an error.
-    indexed = []
-    for i in range(count):
-        element = fields.nth(i)
-        element_id = element.get_attribute("id") or ""
-        suffix = element_id.rsplit("_", 1)[-1]
-        indexed.append((int(suffix) if suffix.isdigit() else i, element))
-    indexed.sort()
-
-    offset = 0
-    for _, element in indexed:
-        maxlength = element.get_attribute("maxlength")
-        take = int(maxlength) if maxlength and maxlength.isdigit() else len(digits) - offset
-        element.fill(digits[offset:offset + take])
-        offset += take
-    logger.info(f"[{market}]   filled {count} split postcode field(s) with {digits}")
-    return True
 
 
-def read_delivery_location(page) -> str:
-    """Whatever Amazon's 'Deliver to ...' widget currently says."""
-    try:
-        ingress = page.locator(GLOW_INGRESS_SELECTOR)
-        if ingress.count() == 0:
-            return ""
-        return " ".join(ingress.first.inner_text().split())
-    except Exception:
-        return ""
 
-
-def select_country(page, market: str) -> bool:
-    """Pick DELIVERY_COUNTRY in the glow modal's country picker.
-
-    Confirmed against real amazon.de markup (dump_glow_dom.py): the
-    picker is a **native `<select id="GLUXCountryList">` with 242
-    options**, styled by Amazon's a-dropdown. The visible thing you'd
-    click, `#GLUXCountryListDropdown`, is a `<span>`, and the pretty
-    option list it opens is a *separate* `<ul role="listbox">` of
-    `li.a-dropdown-item > a` that doesn't exist until it's opened — and
-    is not a descendant of #GLUXCountryList. An earlier version looked
-    for "#GLUXCountryList li a", which therefore matched nothing on
-    every market, every time.
-
-    Driving the native <select> is both simpler and sturdier than
-    clicking through the popover: Amazon binds its declarative handler
-    to the select's change event, so setting it is what actually applies
-    the choice. The popover route is kept as a fallback in case some
-    market renders the picker differently.
-    """
-    select = page.locator("#GLUXCountryList")
-    if select.count():
-        tag = select.first.evaluate("el => el.tagName.toLowerCase()")
-        if tag == "select":
-            labels = select.first.evaluate(
-                "el => Array.from(el.options).map(o => o.text.trim())"
-            )
-            logger.info(f"[{market}]   country <select> offers {len(labels)} option(s)")
-            if DELIVERY_COUNTRY not in labels:
-                logger.warning(
-                    f"[{market}]   {DELIVERY_COUNTRY!r} is not in this market's country list — "
-                    f"it may not ship there. First 12: {labels[:12]}"
-                )
-                return False
-            # Exact label match, never substring: "United States" must
-            # not select "United States Minor Outlying Islands".
-            select.first.select_option(label=DELIVERY_COUNTRY, timeout=5000)
-            logger.info(f"[{market}]   selected {DELIVERY_COUNTRY!r} in the native <select>")
-            return True
-        logger.info(f"[{market}]   #GLUXCountryList is a <{tag}>, not a <select> — trying the popover")
-
-    # Fallback: open the styled dropdown and click the rendered list.
-    dropdown = page.locator("#GLUXCountryListDropdown")
-    if dropdown.count() == 0:
-        # Expected on the domestic market: amazon.se's modal offers only
-        # "sign in" or a Swedish postcode — there's no ship-to-another-
-        # country option on your own country's site. Info, not a
-        # warning; the caller warns loudly if the postcode fallback also
-        # fails to apply anything.
-        logger.info(f"[{market}]   no country picker in this modal (expected on the domestic market)")
-        return False
-    dropdown.first.click(timeout=5000)
-    page.wait_for_timeout(1000)
-
-    options = page.locator("[role='listbox'] li.a-dropdown-item a, .a-dropdown-item a")
-    labels = [" ".join(options.nth(i).inner_text().split()) for i in range(options.count())]
-    logger.info(f"[{market}]   popover list offers {len(labels)} option(s)")
-    if DELIVERY_COUNTRY not in labels:
-        logger.warning(
-            f"[{market}]   {DELIVERY_COUNTRY!r} not in the popover list. First 12: {labels[:12]}"
-        )
-        return False
-    options.nth(labels.index(DELIVERY_COUNTRY)).click(timeout=5000)
-    logger.info(f"[{market}]   selected {DELIVERY_COUNTRY!r} via the popover list")
-    return True
-
-
-def set_delivery_location(page, market: str, config: dict) -> str:
-    """Pin the delivery destination to DELIVERY_COUNTRY/DELIVERY_POSTCODE.
-
-    Two different modal shapes, depending on whether the destination is
-    the marketplace's own country:
-
-      * domestic  -> a postcode field (#GLUXZipUpdateInput) + Apply.
-                     Only valid domestically: the field is validated
-                     against the marketplace's own country ("Please
-                     enter a five-digit German postcode" on .de) and
-                     carries that country's maxlength.
-      * elsewhere -> the country picker, no postcode, because Amazon
-                     only quotes country-level estimates across borders
-
-    Called once per market, after warm-up: the choice is stored in the
-    session cookies, so every product page in that context inherits it.
-
-    Never raises. A failure here doesn't invalidate the run, it just
-    means the dates describe Amazon's guessed destination instead of the
-    requested one — so it returns whatever the widget ends up saying and
-    lets the caller log the discrepancy loudly.
-
-    Selectors are taken from a real amazon.de modal captured with
-    dump_glow_dom.py, not guessed. Every step still logs what it found,
-    so a market whose modal differs is diagnosable from the log alone.
-    """
-    domestic = config["country"].strip().lower() == DELIVERY_COUNTRY.strip().lower()
-    logger.info(
-        f"[{market}] pinning delivery location to {DELIVERY_COUNTRY!r}"
-        + (f" (postcode {DELIVERY_POSTCODE} as fallback)" if domestic else "")
-        + f"; currently reads {read_delivery_location(page)!r}"
-    )
-
-    try:
-        for selector in GLOW_OPENER_SELECTORS:
-            opener = page.locator(selector)
-            if opener.count():
-                opener.first.click(timeout=5000)
-                logger.info(f"[{market}]   opened location picker via {selector!r}")
-                break
-        else:
-            logger.warning(f"[{market}]   no location picker on this page — leaving location as-is")
-            return read_delivery_location(page)
-
-        page.wait_for_timeout(1500)
-
-        # Country first, on EVERY market including the domestic one.
-        # Expressing the destination as a country is the only form every
-        # modal supports, and it keeps all markets answering the same
-        # question. It's also what .se needs: its modal never rendered
-        # #GLUXZipUpdateInput at all (8s timeout on a real run), so the
-        # domestic-postcode path simply didn't work there.
-        if not select_country(page, market):
-            if not domestic:
-                return read_delivery_location(page)
-            # Domestic fallback: a modal with no usable country picker
-            # can still take a postcode, and postcode-level estimates
-            # are more precise than country-level ones.
-            logger.info(f"[{market}]   no country selection; using postcode {DELIVERY_POSTCODE}")
-            if not fill_postcode(page, market, DELIVERY_POSTCODE):
-                return read_delivery_location(page)
-            # #GLUXZipUpdate is a <span> wrapping the real
-            # <input type="submit">; click the input directly.
-            apply_button = page.locator("#GLUXZipUpdate input.a-button-input")
-            (apply_button if apply_button.count() else page.locator("#GLUXZipUpdate")).first.click(timeout=5000)
-            logger.info(f"[{market}]   submitted postcode {DELIVERY_POSTCODE}")
-
-        # Applying either way swaps in a success panel whose "Continue"
-        # button (#GLUXConfirmClose) starts hidden inside
-        # #GLUXHiddenSuccessDialog — so it becoming visible is itself
-        # confirmation that Amazon accepted the change, not just that we
-        # clicked something. Fall back to the modal's plain "Done".
-        page.wait_for_timeout(1500)
-        for selector in ("#GLUXConfirmClose", "[name='glowDoneButton']"):
-            button = page.locator(selector)
-            if button.count() and button.first.is_visible():
-                button.first.click(timeout=5000)
-                logger.info(f"[{market}]   confirmed via {selector!r}")
-                break
-        else:
-            logger.info(f"[{market}]   no confirm/done button became visible")
-
-        # The change is applied server-side against the session; reload
-        # so the widget (and everything downstream) reflects it.
-        page.wait_for_timeout(2500)
-        page.reload(wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1500)
-    except Exception as e:
-        logger.warning(f"[{market}]   could not set delivery location: {e}")
-
-    return read_delivery_location(page)
-
-
-def safe_goto(page, url: str, market: str) -> None:
-    """Navigate, tolerate Amazon's spurious download prompt, then settle
-    the page (cookie banner + any chained interstitial).
-
-    Every navigation must go through this. The retry path below used to
-    call page.goto() directly, and a real run showed exactly why that
-    was wrong: two .se products hit "Page.goto: Download is starting" on
-    the retry, which propagated out and killed the item as an ERROR even
-    though the initial navigation had handled the identical condition
-    fine three times in the same run.
-    """
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
-        # Amazon occasionally triggers a spurious download prompt on
-        # navigation (seen live: "Download is starting") — the catalog
-        # scraper already tolerates this; the delivery tracker didn't,
-        # so one flaky nav crashed the item AND cascaded into
-        # "navigation interrupted" errors for every item after it, since
-        # the aborted goto left the page mid-transition.
-        if "Download is starting" in str(e):
-            logger.info(f"[{market}]   navigation triggered a spurious download prompt, continuing anyway")
-            page.wait_for_timeout(1000)
-        else:
-            raise
-
-    page.wait_for_timeout(2000)
-    dismiss_cookie_banner(page, market)
-    for attempt in range(2):
-        if not dismiss_continue_shopping_interstitial(page, market):
-            break
-        logger.info(f"[{market}]   re-checking for a chained interstitial (attempt {attempt + 1}/2)")
 
 
 def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, date_pattern: re.Pattern) -> dict:
@@ -952,7 +604,7 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
     if seller_text:
         logger.info(f"[{market}]   seller/dispatch block: {seller_text!r} (amazon={amazon_seller})")
     else:
-        logger.info(f"[{market}]   no seller/dispatch block found (SELLER_SELECTORS unverified — see comment)")
+        logger.info(f"[{market}]   no seller/dispatch block found (normal when there is no offer)")
 
     def result(date: str) -> dict:
         return {"date": date, "seller_text": seller_text, "is_amazon_seller": amazon_seller}
@@ -1132,52 +784,7 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
             del state[asin]
 
     with sync_playwright() as p:
-        logger.info(f"[{market}] launching Chromium (headless={HEADLESS})")
-        browser = p.chromium.launch(headless=HEADLESS, channel="chromium")
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale=config["locale"],
-        )
-        page = context.new_page()
-
-        # Warm up on the "/-/en/" homepage, not the bare domain. The bare
-        # domain sets the session's language cookie to the market's
-        # native language, which then has to be fought off by the
-        # "/-/en/" prefix on every subsequent product URL; warming up on
-        # the English homepage sets that cookie to English up front so
-        # the whole session agrees on one language. Also gets the cookie
-        # banner out of the way once instead of per product.
-        warmup_url = f"https://www.{config['domain']}/-/en/"
-        delivery_location = ""
-        logger.info(f"[{market}] warming up: navigating to {warmup_url}")
-        try:
-            page.goto(warmup_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
-            dismiss_cookie_banner(page, market)
-            dismiss_continue_shopping_interstitial(page, market)
-            logger.info(f"[{market}] warm-up complete")
-            delivery_location = set_delivery_location(page, market, config)
-            # Loud, because it changes what every date in this run means.
-            # Substring check both ways: the widget renders the country
-            # alone for international ("Sweden") but city + postcode for
-            # domestic ("Stockholm 111 64"), so neither is a prefix of a
-            # fixed expected string.
-            if delivery_location and (
-                DELIVERY_COUNTRY.lower() in delivery_location.lower()
-                or DELIVERY_POSTCODE.replace(" ", "") in delivery_location.replace(" ", "")
-            ):
-                logger.info(f"[{market}] delivery location confirmed: {delivery_location!r}")
-            else:
-                logger.warning(
-                    f"[{market}] DELIVERY LOCATION NOT APPLIED — widget reads {delivery_location!r}, "
-                    f"wanted {DELIVERY_COUNTRY}/{DELIVERY_POSTCODE}. Dates from this market describe "
-                    f"delivery to Amazon's guessed destination and are NOT comparable to the others."
-                )
-        except Exception as e:
-            logger.warning(f"[{market}] homepage warm-up failed: {e}")
+        browser_handle, page, delivery_location = open_market(p, market, config)
 
         for i, asin in enumerate(asins, start=1):
             # "/-/en/" is Amazon's language-override path segment, forcing
@@ -1263,7 +870,7 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
             }
 
         logger.info(f"[{market}] closing browser")
-        browser.close()
+        browser_handle.close()
 
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
