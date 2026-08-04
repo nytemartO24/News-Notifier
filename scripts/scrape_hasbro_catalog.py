@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 """
+SUPERSEDED — no longer on cron.
+
+Replaced by the EU multi-market pilot (pilot/eu_multimarket/), which
+covers se/de/fr/es instead of .se alone, pins every market to one
+delivery destination so their answers are comparable, and distinguishes
+OUT OF STOCK / NO DATE YET / NOT DELIVERABLE / NO OFFER instead of
+flattening them.
+
+Kept because it still runs by hand and is the reference for how the .se
+case behaved. Do NOT re-add it to deploy/crontab.txt without removing
+the pilot's job first: both track the same products and would produce
+duplicate Discord alerts from diverging state.
+"""
+
+"""
 Scrapes every Hasbro-branded "Beyblade X" listing from amazon.se search
 results and merges newly-found ASINs into products.txt (used by
 track_delivery_date_playwright.py), skipping anything already in
