@@ -1,17 +1,49 @@
 # Running on a VPS instead of GitHub Actions
 
-This moves the three scrapers off GitHub Actions' scheduler (unreliable
+This moves the scrapers off GitHub Actions' scheduler (unreliable
 below ~1hr intervals, see the workflow history) onto plain cron on a small
 VPS, running as often as every 30 minutes.
 
-State files (`state.json`, `scripts/delivery_state.json`,
-`scripts/products.txt`) live locally on the VPS from now on — they are no
+**Three jobs run on cron:**
+
+| every | job | what |
+|---|---|---|
+| `:00 :30` | `pilot/eu_multimarket/track_delivery_multi.py` | delivery dates for the whitelist, across se/de/fr/es |
+| `:10 :40` | `pilot/eu_multimarket/scrape_catalog_multi.py` | new Beyblade X products, per market |
+| `:20 :50` | `scripts/scrape_hypixel.py` | Hypixel patch notes |
+
+Beyblade tracking is the **EU multi-market pilot**. It replaced the
+`.se`-only `scripts/track_delivery_date_playwright.py` and
+`scripts/scrape_hasbro_catalog.py`, which are no longer scheduled — they
+remain in the repo, still runnable by hand, and are marked SUPERSEDED at
+the top of each file. Don't schedule both: they track the same products
+and would produce duplicate Discord alerts from diverging state.
+
+Re-running `deploy/setup.sh` performs that migration — it reports which
+retired jobs it removed, then installs the current schedule.
+
+State files (`state.json`, `pilot/eu_multimarket/state/`,
+`scripts/delivery_state.json`, `scripts/products.txt`) live locally on
+the VPS from now on — they are no
 longer committed back to the GitHub repo. Don't run the GitHub Actions
 workflows on a schedule at the same time as this setup, or you'll get
 duplicate Discord notifications and the VPS's and repo's state will drift
 apart. The workflows' `schedule:` triggers have been removed for this
 reason; `workflow_dispatch` (the manual "Run workflow" button) still works
 as a one-off fallback if you ever need it.
+
+## Upgrading an existing VPS
+
+```bash
+cd ~/news-notifier
+git pull
+./deploy/setup.sh      # idempotent: re-installs deps and the crontab
+./deploy/status.sh     # shows what's scheduled and what has run
+```
+
+`setup.sh` never overwrites your `.env`. If you want the EU pilot to quote
+delivery dates against somewhere other than the default (Sweden / 37116),
+add `DELIVERY_COUNTRY` and `DELIVERY_POSTCODE` — see `deploy/env.example`.
 
 ## 1. Provision the VPS
 

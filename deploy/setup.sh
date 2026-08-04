@@ -33,7 +33,8 @@ source .venv/bin/activate
 
 echo "==> Installing Python dependencies"
 pip install --upgrade pip
-pip install -r requirements-bbx.txt -r requirements-hypixel.txt
+pip install -r requirements-bbx.txt -r requirements-hypixel.txt \
+  -r pilot/eu_multimarket/requirements.txt
 
 echo "==> Installing Playwright's Chromium and its OS dependencies"
 python -m playwright install-deps chromium
@@ -44,7 +45,19 @@ if [ ! -f "$APP_DIR/.env" ]; then
   cp deploy/env.example "$APP_DIR/.env"
 fi
 
-chmod +x deploy/run.sh
+chmod +x deploy/run.sh deploy/status.sh
+
+# Show what's being retired before it disappears, so a re-run that
+# silently drops a job you still wanted is visible rather than mysterious.
+retired="$(crontab -l 2>/dev/null \
+  | grep "$APP_DIR/deploy/run.sh" \
+  | grep -E "scripts/(track_delivery_date_playwright|scrape_hasbro_catalog)\.py" || true)"
+if [ -n "$retired" ]; then
+  echo "==> Removing superseded .se-only Beyblade cron jobs:"
+  printf '      %s\n' "$retired"
+  echo "    (replaced by the EU multi-market pilot scrapers — the scripts"
+  echo "     themselves stay in the repo and can still be run by hand)"
+fi
 
 echo "==> Installing crontab (replacing any previous news-notifier entries)"
 {
@@ -60,8 +73,14 @@ cat <<EOF
 Done.
 
 Next steps:
-  1. Edit $APP_DIR/.env with your real Discord webhook URL / user ID.
-  2. Check the installed schedule with: crontab -l
-  3. Tail a log after the next tick, e.g.: tail -f $APP_DIR/logs/delivery.log
+  1. Edit $APP_DIR/.env — Discord webhook/user id, and the delivery
+     destination the EU pilot quotes every market against.
+  2. Check what's scheduled and what has run:  $APP_DIR/deploy/status.sh
+  3. Tail a log after the next tick, e.g.:
+       tail -f $APP_DIR/logs/delivery-multi.log
   4. Confirm cron itself is firing: grep CRON /var/log/syslog | tail
+
+Beyblade tracking is now the EU multi-market pilot (se/de/fr/es), not
+the old .se-only scripts. Those are unscheduled but still present, and
+still runnable by hand if you need them.
 EOF

@@ -1,27 +1,40 @@
 # News-Notifier
 
 Personal Discord-notification scrapers: Hypixel SkyBlock patch notes, and
-Amazon.se Beyblade X (Hasbro toy) catalog/delivery tracking. Originally ran
-entirely on GitHub Actions; production now runs on a VPS via cron (see
+Amazon Beyblade X (Hasbro toy) catalog/delivery tracking. Originally ran
+entirely on GitHub Actions; everything now runs on a VPS via cron (see
 "VPS deployment" below) because Actions' scheduler proved unreliable well
-below the ~30 min cadence needed. There's also a separate, unrelated-to-
-production EU multi-market pilot (see below) exploring tracking the same
-kind of Amazon data across all EU marketplaces, not just `.se`.
+below the ~30 min cadence needed.
+
+The Beyblade side is the **EU multi-market pilot**
+(`pilot/eu_multimarket/`), which as of 2026-08-04 is the deployed system —
+it tracks se/de/fr/es rather than `.se` alone. The original `.se`-only
+scripts in `scripts/` are superseded and unscheduled. "Pilot" is now a
+historical name, not a statement about whether it's live.
 
 ## Repo layout
 
 ```
-scripts/                          Production scrapers (still exist; GH Actions
-  scrape_hypixel.py                 schedules removed, workflow_dispatch-only
-  scrape_hasbro_catalog.py          fallback kept — see "VPS deployment")
-  track_delivery_date_playwright.py
+scripts/
+  scrape_hypixel.py               ON CRON — Hypixel patch notes
+  scrape_hasbro_catalog.py        SUPERSEDED by the pilot, unscheduled
+  track_delivery_date_playwright.py   SUPERSEDED by the pilot, unscheduled
   products.txt / blacklist.txt / delivery_state.json / errors.log
 state.json                        Hypixel scraper's seen-thread state
 
 deploy/                           VPS cron deployment (setup.sh, run.sh,
-                                    crontab.txt, README.md, logrotate.conf)
+                                    status.sh, crontab.txt, env.example,
+                                    README.md, logrotate.conf)
 
-pilot/eu_multimarket/             Standalone EU multi-market pilot — see below
+pilot/eu_multimarket/             ON CRON — the live Beyblade system
+  track_delivery_multi.py           delivery dates across markets
+  scrape_catalog_multi.py           new-product discovery per market
+  browser.py                        shared Chromium/cookie/location plumbing
+  alerts.py                         Discord message formatting
+  marketplaces.py                   per-market config
+  test_discord.py                   send sample alerts to check the webhook
+  dump_glow_dom.py                  diagnostic: dump the location modal
+  state/                            gitignored; whitelist.txt + per-market
 
 .github/workflows/
   hypixel-scraper.yml             workflow_dispatch only (schedule removed)
@@ -33,7 +46,21 @@ pilot/eu_multimarket/             Standalone EU multi-market pilot — see below
 
 ## Production system (VPS, not GitHub Actions)
 
-All three scrapers now run via cron on the user's own VPS —
+**Beyblade tracking is now the EU multi-market pilot, not `scripts/`.**
+`deploy/crontab.txt` schedules `pilot/eu_multimarket/track_delivery_multi.py`
+(:00/:30) and `pilot/eu_multimarket/scrape_catalog_multi.py` (:10/:40),
+both with `--send-discord`, plus `scripts/scrape_hypixel.py` (:20/:50).
+`scripts/track_delivery_date_playwright.py` and
+`scripts/scrape_hasbro_catalog.py` are SUPERSEDED — unscheduled, marked as
+such at the top of each file, still runnable by hand. Don't schedule both
+systems: they track the same products and would double-alert from
+diverging state. `deploy/run.sh` now takes args after the script path and
+holds a per-script `flock` so a slow run can't pile up behind itself.
+`deploy/status.sh` reports what's scheduled, last run per log, recent
+non-zero exits, and per-market state counts — including a warning if the
+retired jobs are somehow still in the crontab.
+
+All scrapers run via cron on the user's own VPS —
 `deploy/setup.sh` bootstraps it (clones repo, venv, Playwright, crontab from
 `deploy/crontab.txt`), `deploy/run.sh` is the cron entry point (loads `.env`,
 sets `RUN_ONCE=true`). Full details in `deploy/README.md`. State files
@@ -66,9 +93,9 @@ protecting).
 
 ## EU multi-market pilot (`pilot/eu_multimarket/`)
 
-Standalone, **not deployed anywhere**, run manually (locally or via the
-on-demand GitHub Actions workflow below) — nothing here touches `scripts/`
-or production state. Covers every EU Amazon marketplace except UK/Ireland
+**Deployed on the VPS cron** (see above) — this is the live Beyblade
+system, not an experiment any more. Still touches nothing in `scripts/`
+and keeps its own state under `pilot/eu_multimarket/state/`. Covers every EU Amazon marketplace except UK/Ireland
 (shipping-cost grounds): `se`, `de`, `fr`, `es`, `nl`, `be`, `it`, `pl` (see
 `marketplaces.py`).
 
