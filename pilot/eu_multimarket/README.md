@@ -42,6 +42,53 @@ echo "B0G4NF8QDZ  # Beyblade X Curse Mummy 7-55W UX Booster Pack" >> pilot/eu_mu
 If `state/whitelist.txt` doesn't exist yet, the script creates it with
 an example line and exits — edit it and rerun.
 
+## Delivery location — pinned, and why it matters
+
+A delivery date is meaningless without a destination, and Amazon picks
+one by geolocation if you don't tell it. The 2026-08-04 VPS run showed
+how badly that breaks cross-market comparison: `se`/`de`/`nl`/`be`/`pl`
+each resolved to a *local* address (Stockholm, Nuremberg, Amsterdam,
+Brussels, Warsaw) while `fr`/`es`/`it` all resolved to **"Deliver to
+Germany"** — the VPS's own country — and served offer-less cross-border
+pages with no buybox and no delivery block at all. No two markets were
+answering the same question, and only `.se` was answering the one that
+matters.
+
+`set_delivery_location()` now pins one destination on every market,
+once per market after warm-up (it's stored in session cookies, so every
+product page inherits it):
+
+```bash
+DELIVERY_COUNTRY=Sweden DELIVERY_POSTCODE=11164 \
+  python pilot/eu_multimarket/track_delivery_multi.py
+```
+
+Two modal shapes, picked automatically from each market's `country`:
+
+- **domestic** (destination == the marketplace's country, e.g. Sweden on
+  `.se`) — postcode field, `#GLUXZipUpdateInput` + Apply
+- **international** (Sweden on `.de`) — country dropdown
+  `#GLUXCountryList`, no postcode, because Amazon only quotes
+  country-level estimates across borders
+
+It never raises. If it can't apply the location, the run continues and
+logs **`DELIVERY LOCATION NOT APPLIED`** — treat any market with that
+warning as not comparable to the others. The destination actually used
+appears on every `OUTCOMES` line and in every debug page snapshot
+(`delivering to`), so you can always tell what a date refers to.
+
+**The glow interaction is verified against a local mock of the widget,
+not against live Amazon** — this sandbox can't reach it. Every step logs
+what it found, so a real run is diagnosable from the log.
+
+## Markets
+
+Default: **`se de fr es`**. The other four (`nl`, `be`, `it`, `pl`) stay
+fully configured and can be run by naming them explicitly — they're
+deliberately not deleted, since their month/signal tables are tested and
+`pl`'s genitive months and confirmed `obecnie niedostępny` phrase would
+be tedious to rebuild.
+
 ## Troubleshooting a run (`--debug`)
 
 Runs happen via the **Pilot-EU-Multimarket-Test** GitHub Actions

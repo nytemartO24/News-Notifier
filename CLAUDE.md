@@ -171,6 +171,26 @@ behind verified English phrasing as a fallback rather than being the
 only thing between a page and `UNKNOWN`. Only one has been confirmed to
 fire against a real page so far: `pl`'s `obecnie niedostępny` (5 hits).
 
+**Delivery location is pinned, and this is load-bearing.** A date means
+nothing without a destination, and Amazon geolocates one if you don't
+say. The 2026-08-04 VPS run resolved a *different* destination per
+market — `se`/`de`/`nl`/`be`/`pl` got local addresses (Stockholm,
+Nuremberg, Amsterdam, Brussels, Warsaw) while `fr`/`es`/`it` all got
+"Deliver to Germany" (the VPS's own country) and served offer-less
+cross-border pages. `set_delivery_location()` now pins
+`DELIVERY_COUNTRY`/`DELIVERY_POSTCODE` (default Sweden / 11164) on every
+market after warm-up, via Amazon's glow widget — postcode field when the
+destination is the marketplace's own country, country dropdown when it
+isn't. Failure is non-fatal but logs `DELIVERY LOCATION NOT APPLIED`;
+any market showing that is not comparable to the others. The destination
+used appears on every `OUTCOMES` line and in every page snapshot.
+Verified against a local mock of the widget, **not** against live Amazon.
+
+**Default markets are `se de fr es`** (user's choice). `nl`/`be`/`it`/`pl`
+remain configured and runnable by name — don't delete them; `pl`'s
+genitive months and its confirmed `obecnie niedostępny` phrase are
+tested work.
+
 **Debug logging**: `--debug` / `DEBUG=true` (the test workflow's `debug`
 input, default on) logs a full page snapshot per product — `<html lang>`
 (did the `/-/en/` override win?), a page-kind matrix (product page vs.

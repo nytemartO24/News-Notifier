@@ -21,7 +21,15 @@ on:
       markets:
         description: "Space-separated market codes (see pilot/eu_multimarket/marketplaces.py)"
         required: false
-        default: "se de"
+        default: "se de fr es"
+      delivery_country:
+        description: "Delivery destination country. Pinned on every market so their dates are comparable — leave as Sweden unless testing."
+        required: false
+        default: "Sweden"
+      delivery_postcode:
+        description: "Postcode used when the destination country IS the marketplace's own country"
+        required: false
+        default: "11164"
       send_discord:
         description: "Actually post to Discord instead of just logging (uses the same repo secrets as production)"
         required: false
@@ -68,6 +76,8 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
           DEBUG: ${{ inputs.debug }}
+          DELIVERY_COUNTRY: ${{ inputs.delivery_country }}
+          DELIVERY_POSTCODE: ${{ inputs.delivery_postcode }}
         run: |
           python pilot/eu_multimarket/track_delivery_multi.py ${{ inputs.markets }} \
             ${{ inputs.send_discord == 'true' && '--send-discord' || '' }}

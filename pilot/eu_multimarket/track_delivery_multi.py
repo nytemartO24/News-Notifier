@@ -65,6 +65,38 @@ HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
 # Reassigned in __main__ once the CLI flag is parsed.
 DEBUG = os.environ.get("DEBUG", "").lower() == "true"
 
+# Where we're pretending to be, for delivery-estimate purposes.
+#
+# This is not cosmetic. A delivery date only means anything relative to a
+# destination, and Amazon picks one by geolocation if you don't tell it —
+# which produced a genuinely useless run on 2026-08-04: se/de/nl/be/pl
+# each resolved to a local address (Stockholm, Nuremberg, Amsterdam,
+# Brussels, Warsaw) while fr/es/it all resolved to "Deliver to Germany"
+# (the VPS's own country) and served offer-less cross-border pages. So no
+# two markets were answering the same question, and only .se was
+# answering the one that matters: "when would this arrive at MY address".
+#
+# Pinning one destination across every market makes the numbers
+# comparable and makes "is it cheaper/sooner from .de than .se?" a
+# question the pilot can actually answer.
+DELIVERY_COUNTRY = os.environ.get("DELIVERY_COUNTRY", "Sweden")
+DELIVERY_POSTCODE = os.environ.get("DELIVERY_POSTCODE", "11164")  # Stockholm
+
+# Amazon's "Deliver to ..." location widget ("glow").
+GLOW_INGRESS_SELECTOR = "#glow-ingress-line2"
+GLOW_OPENER_SELECTORS = [
+    "#nav-global-location-popover-link",
+    "#glow-ingress-block",
+    GLOW_INGRESS_SELECTOR,
+]
+
+# Markets checked when none are named on the command line. The other
+# four (nl, be, it, pl) stay fully configured in marketplaces.py and can
+# still be run explicitly — they're deliberately not deleted, since
+# their month/signal tables are tested and pl's genitive months and
+# confirmed "obecnie niedostępny" phrase would be tedious to rebuild.
+DEFAULT_MARKETS = ["se", "de", "fr", "es"]
+
 CANDIDATE_SELECTORS = [
     "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
     "#deliveryBlockMessage",
@@ -135,6 +167,9 @@ PAGE_KIND_SELECTORS = {
     "price block": "#corePrice_feature_div, #priceblock_ourprice",
     "CAPTCHA input": "#captchacharacters",
     "cookie banner": "#sp-cc",
+    # A date is meaningless without knowing where it's being delivered
+    # to, so every snapshot carries the destination Amazon used.
+    "delivering to": "#glow-ingress-line2",
 }
 
 # Delivery copy in every pilot language, English first. Used only to
@@ -528,6 +563,102 @@ def is_amazon_seller(seller_text: str):
     return "amazon" in seller_text.lower()
 
 
+def read_delivery_location(page) -> str:
+    """Whatever Amazon's 'Deliver to ...' widget currently says."""
+    try:
+        ingress = page.locator(GLOW_INGRESS_SELECTOR)
+        if ingress.count() == 0:
+            return ""
+        return " ".join(ingress.first.inner_text().split())
+    except Exception:
+        return ""
+
+
+def set_delivery_location(page, market: str, config: dict) -> str:
+    """Pin the delivery destination to DELIVERY_COUNTRY/DELIVERY_POSTCODE.
+
+    Two different modal shapes, depending on whether the destination is
+    the marketplace's own country:
+
+      * domestic  -> a postcode field (#GLUXZipUpdateInput) + Apply
+      * elsewhere -> a country dropdown (#GLUXCountryList), no postcode,
+                     because Amazon only quotes country-level estimates
+                     for international delivery
+
+    Called once per market, after warm-up: the choice is stored in the
+    session cookies, so every product page in that context inherits it.
+
+    Never raises. A failure here doesn't invalidate the run, it just
+    means the dates describe Amazon's guessed destination instead of the
+    requested one — so it returns whatever the widget ends up saying and
+    lets the caller log the discrepancy loudly. UNVERIFIED against live
+    Amazon (this sandbox can't reach it); every step logs what it found
+    so a real run can be diagnosed from the log.
+    """
+    domestic = config["country"].strip().lower() == DELIVERY_COUNTRY.strip().lower()
+    target = DELIVERY_POSTCODE if domestic else DELIVERY_COUNTRY
+    logger.info(
+        f"[{market}] pinning delivery location to {target!r} "
+        f"({'domestic postcode' if domestic else 'international country'}); "
+        f"currently reads {read_delivery_location(page)!r}"
+    )
+
+    try:
+        for selector in GLOW_OPENER_SELECTORS:
+            opener = page.locator(selector)
+            if opener.count():
+                opener.first.click(timeout=5000)
+                logger.info(f"[{market}]   opened location picker via {selector!r}")
+                break
+        else:
+            logger.warning(f"[{market}]   no location picker on this page — leaving location as-is")
+            return read_delivery_location(page)
+
+        page.wait_for_timeout(1500)
+
+        if domestic:
+            zip_input = page.locator("#GLUXZipUpdateInput")
+            zip_input.wait_for(timeout=8000)
+            zip_input.fill(DELIVERY_POSTCODE)
+            page.locator("#GLUXZipUpdate").first.click(timeout=5000)
+            logger.info(f"[{market}]   submitted postcode {DELIVERY_POSTCODE}")
+        else:
+            dropdown = page.locator("#GLUXCountryListDropdown")
+            dropdown.wait_for(timeout=8000)
+            dropdown.click(timeout=5000)
+            page.wait_for_timeout(800)
+
+            # Match the country name exactly rather than by substring —
+            # "Ireland" is a substring of nothing here, but e.g. a
+            # careless match could pick "United States Minor Outlying
+            # Islands" for "United States".
+            options = page.locator("#GLUXCountryList li a")
+            labels = [" ".join(options.nth(i).inner_text().split()) for i in range(options.count())]
+            logger.info(f"[{market}]   country list offers {len(labels)} option(s)")
+            if DELIVERY_COUNTRY not in labels:
+                logger.warning(
+                    f"[{market}]   {DELIVERY_COUNTRY!r} is not in this market's country list "
+                    f"— it may not ship there. Options: {labels}"
+                )
+                return read_delivery_location(page)
+            options.nth(labels.index(DELIVERY_COUNTRY)).click(timeout=5000)
+            page.wait_for_timeout(800)
+            done = page.locator("[name='glowDoneButton']")
+            if done.count():
+                done.first.click(timeout=5000)
+            logger.info(f"[{market}]   selected country {DELIVERY_COUNTRY}")
+
+        # The change is applied server-side against the session; reload
+        # so the widget (and everything downstream) reflects it.
+        page.wait_for_timeout(2500)
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+    except Exception as e:
+        logger.warning(f"[{market}]   could not set delivery location: {e}")
+
+    return read_delivery_location(page)
+
+
 def safe_goto(page, url: str, market: str) -> None:
     """Navigate, tolerate Amazon's spurious download prompt, then settle
     the page (cookie banner + any chained interstitial).
@@ -851,6 +982,7 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
         # the whole session agrees on one language. Also gets the cookie
         # banner out of the way once instead of per product.
         warmup_url = f"https://www.{config['domain']}/-/en/"
+        delivery_location = ""
         logger.info(f"[{market}] warming up: navigating to {warmup_url}")
         try:
             page.goto(warmup_url, wait_until="domcontentloaded", timeout=30000)
@@ -858,6 +990,23 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
             dismiss_cookie_banner(page, market)
             dismiss_continue_shopping_interstitial(page, market)
             logger.info(f"[{market}] warm-up complete")
+            delivery_location = set_delivery_location(page, market, config)
+            # Loud, because it changes what every date in this run means.
+            # Substring check both ways: the widget renders the country
+            # alone for international ("Sweden") but city + postcode for
+            # domestic ("Stockholm 111 64"), so neither is a prefix of a
+            # fixed expected string.
+            if delivery_location and (
+                DELIVERY_COUNTRY.lower() in delivery_location.lower()
+                or DELIVERY_POSTCODE.replace(" ", "") in delivery_location.replace(" ", "")
+            ):
+                logger.info(f"[{market}] delivery location confirmed: {delivery_location!r}")
+            else:
+                logger.warning(
+                    f"[{market}] DELIVERY LOCATION NOT APPLIED — widget reads {delivery_location!r}, "
+                    f"wanted {DELIVERY_COUNTRY}/{DELIVERY_POSTCODE}. Dates from this market describe "
+                    f"delivery to Amazon's guessed destination and are NOT comparable to the others."
+                )
         except Exception as e:
             logger.warning(f"[{market}] homepage warm-up failed: {e}")
 
@@ -977,7 +1126,10 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
 
     total = sum(outcomes.values())
     tally = "  ".join(f"{label}={count}" for label, count in outcomes.items())
-    logger.info(f"OUTCOMES [{market.upper()}] {tally}  (real dates: {outcomes['real date']}/{total})")
+    logger.info(
+        f"OUTCOMES [{market.upper()}] {tally}  (real dates: {outcomes['real date']}/{total})"
+        f"  [delivering to: {delivery_location or 'UNKNOWN'}]"
+    )
     if outcomes["UNKNOWN"] and not DEBUG:
         logger.info(
             f"[{market}] {outcomes['UNKNOWN']} UNKNOWN result(s) — each one printed a page "
@@ -990,7 +1142,13 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("markets", nargs="*", default=list(MARKETPLACES), help="Market codes to check (default: all configured)")
+    parser.add_argument(
+        "markets",
+        nargs="*",
+        default=DEFAULT_MARKETS,
+        help=f"Market codes to check (default: {' '.join(DEFAULT_MARKETS)}; "
+             f"all configured: {' '.join(MARKETPLACES)})",
+    )
     parser.add_argument("--send-discord", action="store_true", help="Actually post to Discord instead of just logging what would be sent")
     parser.add_argument(
         "--debug",
