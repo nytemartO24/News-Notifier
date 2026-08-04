@@ -119,6 +119,17 @@ delivery block hasn't rendered" into a confident wrong `NO DATE YET`); and
 the EU cookie-consent banner (`#sp-cc-accept`) is dismissed, which
 production never had to handle because its VPS browser profile is warm.
 
+**Do NOT treat a low hit rate as a bug.** The whitelist is deliberately
+rare, frequently-out-of-stock ASINs, so `NO DATE YET` / `OUT OF STOCK` /
+`NOT DELIVERABLE` / `NO OFFER` are the *expected* answers most of the
+time, and a market returning 0 real dates is usually reporting reality
+rather than failing. The metric that matters is not "how many dates did
+we get" but "when an item did become orderable, did we notice and
+alert". `UNKNOWN` is the only outcome that means something went wrong —
+that's exactly why the states above were given their own names instead
+of being flattened into it. (Confirmed by the user, 2026-08-04, after
+several rounds of me wrongly reading hit rate as a quality signal.)
+
 **Verified live** (run 30803204143, 2026-08-03, 8 markets x 8 ASINs,
 `--debug`). The language fix is confirmed correct by direct evidence:
 `<html lang>` came back **`en-gb` on every market except `pl`** (which
@@ -179,12 +190,19 @@ Nuremberg, Amsterdam, Brussels, Warsaw) while `fr`/`es`/`it` all got
 "Deliver to Germany" (the VPS's own country) and served offer-less
 cross-border pages. `set_delivery_location()` now pins
 `DELIVERY_COUNTRY`/`DELIVERY_POSTCODE` (default Sweden / 11164) on every
-market after warm-up, via Amazon's glow widget. **Country picker on every
-market, including `se`** — `#GLUXCountryList` is a native `<select>` (242
-options), not a list of links; the styled `<ul role="listbox">` is a
-separate element that exists only once opened. Postcode
-(`#GLUXZipUpdateInput`) is a domestic-only fallback: `amazon.se`'s modal
-never rendered that field at all. Success is confirmed by
+market after warm-up, via Amazon's glow widget. The modal differs by
+market, from real markup: `de`/`fr`/`es` have a native
+`<select id="GLUXCountryList">` (242+ options — *not* a list of links;
+the styled `<ul role="listbox">` is a separate element existing only
+once opened) plus a single 5-char `#GLUXZipUpdateInput`. **`amazon.se`
+has no country picker at all** (you can't ask your own country's site to
+ship abroad) and splits the postcode across **two** fields,
+`#GLUXZipUpdateInput_0` (maxlength 3) + `_1` (2), for `371 16`. So the
+code tries the country picker, then falls back to the postcode —
+landing on the right mechanism for both without special-casing markets.
+`fill_postcode()` splits by each field's own `maxlength` and sorts on
+the `_N` suffix (filling those backwards would yield a different,
+valid-looking postcode rather than an error). Success is confirmed by
 `#GLUXConfirmClose` becoming visible (it starts hidden inside
 `#GLUXHiddenSuccessDialog`). Failure is non-fatal but logs `DELIVERY
 LOCATION NOT APPLIED`; any market showing that is not comparable to the

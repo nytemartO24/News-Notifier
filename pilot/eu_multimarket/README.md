@@ -59,17 +59,29 @@ once per market after warm-up (it's stored in session cookies, so every
 product page inherits it):
 
 ```bash
-DELIVERY_COUNTRY=Sweden DELIVERY_POSTCODE=11164 \
+DELIVERY_COUNTRY=Sweden DELIVERY_POSTCODE=37116 \
   python pilot/eu_multimarket/track_delivery_multi.py
 ```
 
-Every market uses the **country picker** — including `.se`. Expressing
-the destination as a country is the only form every market's modal
-supports, and it keeps all markets answering the same question.
-(`amazon.se`'s modal never rendered `#GLUXZipUpdateInput` at all, so the
-domestic-postcode path didn't work there anyway.) A postcode is kept as
-a domestic-only fallback for a modal with no country picker, since
-postcode-level estimates are more precise than country-level ones.
+The modal differs per market, confirmed from real markup:
+
+| | `.de` / `.fr` / `.es` | `.se` |
+|---|---|---|
+| country picker | native `<select id="GLUXCountryList">`, 242+ options | **absent entirely** |
+| postcode field | one `#GLUXZipUpdateInput`, maxlength 5 | **two** — `#GLUXZipUpdateInput_0` (3) + `_1` (2), for `371 16` |
+
+So there is no "ship to Sweden" option on `amazon.se` — you can't ask
+your own country's site to deliver abroad, and the modal only offers
+sign-in or a Swedish postcode. That's fine: a postcode is *more*
+precise than a country. The code tries the country picker first and
+falls back to the postcode, which lands on the right mechanism for both
+shapes without special-casing markets.
+
+`fill_postcode()` splits the postcode across however many fields a
+market uses, by reading each field's own `maxlength` rather than
+hardcoding 3/2, and sorts on the `_N` id suffix rather than trusting DOM
+order — filling those two inputs backwards would silently produce a
+different, valid-looking postcode instead of an error.
 
 It never raises. If it can't apply the location, the run continues and
 logs **`DELIVERY LOCATION NOT APPLIED`** — treat any market with that

@@ -79,8 +79,13 @@ DEBUG = os.environ.get("DEBUG", "").lower() == "true"
 # Pinning one destination across every market makes the numbers
 # comparable and makes "is it cheaper/sooner from .de than .se?" a
 # question the pilot can actually answer.
+# Only the domestic market can take a postcode (amazon.se's modal has no
+# country picker at all — see select_country); everywhere else Amazon
+# quotes country-level estimates only. Written without the space that
+# Swedish postcodes normally carry ("371 16"); fill_postcode() splits it
+# across however many input fields the market's modal uses.
 DELIVERY_COUNTRY = os.environ.get("DELIVERY_COUNTRY", "Sweden")
-DELIVERY_POSTCODE = os.environ.get("DELIVERY_POSTCODE", "11164")  # Stockholm
+DELIVERY_POSTCODE = os.environ.get("DELIVERY_POSTCODE", "37116")
 
 # Amazon's "Deliver to ..." location widget ("glow").
 GLOW_INGRESS_SELECTOR = "#glow-ingress-line2"
@@ -582,6 +587,56 @@ def international_shopping_destination(page_text_lower: str) -> str:
     return " ".join(match.group(1).split()).title()
 
 
+def fill_postcode(page, market: str, postcode: str) -> bool:
+    """Type the postcode into the glow modal, whichever shape it takes.
+
+    Markets disagree on this, confirmed against real markup:
+
+      .de  one <input id="GLUXZipUpdateInput" maxlength="5">
+      .se  TWO inputs, #GLUXZipUpdateInput_0 (maxlength 3) and
+           #GLUXZipUpdateInput_1 (maxlength 2), matching how Swedish
+           postcodes are written ("371 16"). There is no singular
+           #GLUXZipUpdateInput on .se at all — waiting for one is what
+           made every .se run fail with an 8s timeout.
+
+    Split fields are filled by each input's own maxlength rather than a
+    hardcoded 3/2, so a market that splits differently still works.
+    """
+    digits = re.sub(r"\D", "", postcode)
+
+    single = page.locator("#GLUXZipUpdateInput")
+    if single.count():
+        single.first.fill(digits)
+        logger.info(f"[{market}]   filled postcode field with {digits}")
+        return True
+
+    fields = page.locator("[id^='GLUXZipUpdateInput_']")
+    count = fields.count()
+    if count == 0:
+        logger.warning(f"[{market}]   no postcode field in this modal")
+        return False
+
+    # DOM order should already be _0, _1, ... but sort on the id suffix
+    # rather than trust it — filling them out of order silently produces
+    # a wrong postcode instead of an error.
+    indexed = []
+    for i in range(count):
+        element = fields.nth(i)
+        element_id = element.get_attribute("id") or ""
+        suffix = element_id.rsplit("_", 1)[-1]
+        indexed.append((int(suffix) if suffix.isdigit() else i, element))
+    indexed.sort()
+
+    offset = 0
+    for _, element in indexed:
+        maxlength = element.get_attribute("maxlength")
+        take = int(maxlength) if maxlength and maxlength.isdigit() else len(digits) - offset
+        element.fill(digits[offset:offset + take])
+        offset += take
+    logger.info(f"[{market}]   filled {count} split postcode field(s) with {digits}")
+    return True
+
+
 def read_delivery_location(page) -> str:
     """Whatever Amazon's 'Deliver to ...' widget currently says."""
     try:
@@ -636,7 +691,12 @@ def select_country(page, market: str) -> bool:
     # Fallback: open the styled dropdown and click the rendered list.
     dropdown = page.locator("#GLUXCountryListDropdown")
     if dropdown.count() == 0:
-        logger.warning(f"[{market}]   no country picker in this modal at all")
+        # Expected on the domestic market: amazon.se's modal offers only
+        # "sign in" or a Swedish postcode — there's no ship-to-another-
+        # country option on your own country's site. Info, not a
+        # warning; the caller warns loudly if the postcode fallback also
+        # fails to apply anything.
+        logger.info(f"[{market}]   no country picker in this modal (expected on the domestic market)")
         return False
     dropdown.first.click(timeout=5000)
     page.wait_for_timeout(1000)
@@ -712,10 +772,9 @@ def set_delivery_location(page, market: str, config: dict) -> str:
             # Domestic fallback: a modal with no usable country picker
             # can still take a postcode, and postcode-level estimates
             # are more precise than country-level ones.
-            logger.info(f"[{market}]   no country selection; falling back to postcode {DELIVERY_POSTCODE}")
-            zip_input = page.locator("#GLUXZipUpdateInput")
-            zip_input.wait_for(timeout=8000)
-            zip_input.fill(DELIVERY_POSTCODE)
+            logger.info(f"[{market}]   no country selection; using postcode {DELIVERY_POSTCODE}")
+            if not fill_postcode(page, market, DELIVERY_POSTCODE):
+                return read_delivery_location(page)
             # #GLUXZipUpdate is a <span> wrapping the real
             # <input type="submit">; click the input directly.
             apply_button = page.locator("#GLUXZipUpdate input.a-button-input")
