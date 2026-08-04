@@ -477,7 +477,18 @@ def dismiss_cookie_banner(page, market: str) -> bool:
         button = page.locator("#sp-cc-accept")
         if button.count() == 0:
             return False
-        button.first.click()
+        try:
+            # Short timeout: the default 30s is pure waste here. Seen
+            # live on amazon.com.be, where a "#redir-modal" backdrop sat
+            # over the banner and Playwright retried the click for the
+            # full 30 seconds before giving up.
+            button.first.click(timeout=5000)
+        except PlaywrightTimeoutError:
+            # The button is visible and enabled — something is just
+            # overlaying it. A DOM-level click ignores the overlay
+            # entirely, where a synthetic one can't.
+            logger.info(f"[{market}]     cookie banner click intercepted, clicking via DOM instead")
+            button.first.evaluate("el => el.click()")
         page.wait_for_timeout(1000)
         logger.info(f"[{market}]     cookie banner accepted")
         return True
@@ -726,6 +737,23 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
             if signal in signal_text:
                 logger.info(f"[{market}]   matched no-date signal: {signal!r}")
                 return result("NO DATE YET (listing has no confirmed delivery estimate)")
+        # A listing with no featured offer ("buybox winner") shows only a
+        # "See All Buying Options" button — no Add to Cart, no price
+        # block, an empty #availability, and consequently no delivery
+        # block at all, because there's no offer to quote a date for.
+        # Every UNKNOWN in the 2026-08-04 VPS run was one of these
+        # (mostly cross-border listings), and they were indistinguishable
+        # from a genuine scrape failure. They are a real, nameable state,
+        # so name it — that keeps UNKNOWN meaning "we don't understand
+        # this page", which is the only way it stays a useful signal.
+        #
+        # Gated on Add-to-Cart being absent as well as the phrase being
+        # present: pages that DO have a featured offer can also link to
+        # all buying options, and misreading one of those would hide a
+        # real failure.
+        if "see all buying options" in signal_text and not soup.select_one("#add-to-cart-button"):
+            logger.info(f"[{market}]   no featured offer (only 'See All Buying Options', no Add to Cart)")
+            return result("NO OFFER (no featured offer on this listing, so no delivery estimate)")
         logger.info(f"[{market}]   no signal phrase matched in the availability region")
     else:
         logger.info(f"[{market}]   no availability/buybox container found — skipping signal check")
@@ -778,7 +806,10 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
     # Per-market outcome tally. The single number worth watching across
     # runs is "real date" — that's the hit rate the pilot is being
     # judged on, and it's tedious to count by hand from the log.
-    outcomes = {"real date": 0, "NO DATE YET": 0, "OUT OF STOCK": 0, "UNKNOWN": 0, "ERROR": 0}
+    outcomes = {"real date": 0, "NO DATE YET": 0, "OUT OF STOCK": 0, "NO OFFER": 0, "UNKNOWN": 0, "ERROR": 0}
+    # ASINs this pass actually got a fresh answer for, so the summary
+    # can distinguish them from carried-over state (see below).
+    refreshed: set[str] = set()
 
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     date_pattern = build_date_pattern(config["months"])
@@ -870,10 +901,13 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
                 logger.warning(f"[{market}] {asin}: {current_date} — keeping previous state")
                 continue
 
+            refreshed.add(asin)
             if current_date.startswith("OUT OF STOCK"):
                 outcomes["OUT OF STOCK"] += 1
             elif current_date.startswith("NO DATE YET"):
                 outcomes["NO DATE YET"] += 1
+            elif current_date.startswith("NO OFFER"):
+                outcomes["NO OFFER"] += 1
             else:
                 outcomes["real date"] += 1
 
@@ -913,23 +947,33 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
 
     state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
+    # Rows not refreshed this pass are flagged rather than silently
+    # shown as current. The 2026-08-04 VPS run made the problem obvious:
+    # .de and .fr both listed a Tide Whale date ("5. August" / "5 août")
+    # that no product returned in that run — leftovers from an older run,
+    # still in their pre-language-fix native format, printed next to
+    # fresh results with nothing to tell them apart. Keeping the stored
+    # value on UNKNOWN is deliberate (it's the previous baseline), but
+    # presenting it as this run's answer is not.
     rows = [
         (
             parse_date_for_sorting(info["date"], config["months"]),
             truncate_name(info["name"]),
             info["date"],
             info.get("is_amazon_seller"),
+            asin in refreshed,
         )
         for asin, info in state.items()
         if asin in asins
     ]
     rows.sort(key=lambda r: (r[0] is None, r[0]))
 
-    name_width = max((len(name) for _, name, _, _ in rows), default=len("Product"))
+    name_width = max((len(name) for _, name, _, _, _ in rows), default=len("Product"))
     logger.info(f"DELIVERY SUMMARY [{market.upper()}] — {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    for _, name, date_str, is_amazon in rows:
+    for _, name, date_str, is_amazon, is_fresh in rows:
         flag = " ⚠️ NOT AMAZON" if is_amazon is False else ("" if is_amazon else " (seller unknown)")
-        logger.info(f"  {name:<{name_width}} | {date_str}{flag}")
+        stale = "" if is_fresh else "  ⏳ STALE — not refreshed this run"
+        logger.info(f"  {name:<{name_width}} | {date_str}{flag}{stale}")
 
     total = sum(outcomes.values())
     tally = "  ".join(f"{label}={count}" for label, count in outcomes.items())
