@@ -179,12 +179,31 @@ Nuremberg, Amsterdam, Brussels, Warsaw) while `fr`/`es`/`it` all got
 "Deliver to Germany" (the VPS's own country) and served offer-less
 cross-border pages. `set_delivery_location()` now pins
 `DELIVERY_COUNTRY`/`DELIVERY_POSTCODE` (default Sweden / 11164) on every
-market after warm-up, via Amazon's glow widget — postcode field when the
-destination is the marketplace's own country, country dropdown when it
-isn't. Failure is non-fatal but logs `DELIVERY LOCATION NOT APPLIED`;
-any market showing that is not comparable to the others. The destination
-used appears on every `OUTCOMES` line and in every page snapshot.
-Verified against a local mock of the widget, **not** against live Amazon.
+market after warm-up, via Amazon's glow widget. **Country picker on every
+market, including `se`** — `#GLUXCountryList` is a native `<select>` (242
+options), not a list of links; the styled `<ul role="listbox">` is a
+separate element that exists only once opened. Postcode
+(`#GLUXZipUpdateInput`) is a domestic-only fallback: `amazon.se`'s modal
+never rendered that field at all. Success is confirmed by
+`#GLUXConfirmClose` becoming visible (it starts hidden inside
+`#GLUXHiddenSuccessDialog`). Failure is non-fatal but logs `DELIVERY
+LOCATION NOT APPLIED`; any market showing that is not comparable to the
+others. The destination used appears on every `OUTCOMES` line and in
+every page snapshot.
+
+**Cross-border pages are the goal, not a failure.** With the destination
+pinned to Sweden, `amazon.de` serves "International Shopping Transition
+Alert … items that dispatch to **Sweden**" — which is exactly the
+question being asked, so those pages are read normally. The banner is
+only a problem when it names a country we *didn't* ask for (the
+US-runner case that originally motivated detecting it), so the
+destination is parsed out of the banner and compared with
+`DELIVERY_COUNTRY`. Don't "restore" the old behaviour of rejecting the
+banner outright — it threw away six perfectly readable `.de` states in
+the 2026-08-04 09:26 run. Two states named as a result:
+`NOT DELIVERABLE` ("This item cannot be dispatched to your selected
+delivery location") and `NO OFFER` (no featured offer, only "See All
+Buying Options"). Both are real answers.
 
 **Default markets are `se de fr es`** (user's choice). `nl`/`be`/`it`/`pl`
 remain configured and runnable by name — don't delete them; `pl`'s

@@ -63,13 +63,13 @@ DELIVERY_COUNTRY=Sweden DELIVERY_POSTCODE=11164 \
   python pilot/eu_multimarket/track_delivery_multi.py
 ```
 
-Two modal shapes, picked automatically from each market's `country`:
-
-- **domestic** (destination == the marketplace's country, e.g. Sweden on
-  `.se`) — postcode field, `#GLUXZipUpdateInput` + Apply
-- **international** (Sweden on `.de`) — country dropdown
-  `#GLUXCountryList`, no postcode, because Amazon only quotes
-  country-level estimates across borders
+Every market uses the **country picker** — including `.se`. Expressing
+the destination as a country is the only form every market's modal
+supports, and it keeps all markets answering the same question.
+(`amazon.se`'s modal never rendered `#GLUXZipUpdateInput` at all, so the
+domestic-postcode path didn't work there anyway.) A postcode is kept as
+a domestic-only fallback for a modal with no country picker, since
+postcode-level estimates are more precise than country-level ones.
 
 It never raises. If it can't apply the location, the run continues and
 logs **`DELIVERY LOCATION NOT APPLIED`** — treat any market with that
@@ -77,9 +77,37 @@ warning as not comparable to the others. The destination actually used
 appears on every `OUTCOMES` line and in every debug page snapshot
 (`delivering to`), so you can always tell what a date refers to.
 
-**The glow interaction is verified against a local mock of the widget,
-not against live Amazon** — this sandbox can't reach it. Every step logs
-what it found, so a real run is diagnosable from the log.
+Selectors come from a real modal captured with `dump_glow_dom.py`:
+`#GLUXCountryList` is a native `<select>` (242 options on `.de`), *not*
+a list of links — the styled `<ul role="listbox">` is a separate element
+that only exists once the dropdown is opened. Success is confirmed by
+`#GLUXConfirmClose` becoming visible, which starts hidden inside
+`#GLUXHiddenSuccessDialog`.
+
+## Cross-border pages are the point, not a failure
+
+With the destination pinned to Sweden, `amazon.de` serves an
+"International Shopping Transition Alert ... items that dispatch to
+**Sweden**" page. That is exactly the question the pilot asks — "can I
+get this from `.de`, delivered to me, and when?" — so those pages are
+read normally.
+
+The same banner is only a problem when it names a country we *didn't*
+ask for (a US-based GitHub runner being shown US shipping, which is what
+originally motivated detecting it). `fetch_delivery_date()` therefore
+parses the destination out of the banner and compares it with
+`DELIVERY_COUNTRY`: match means read the page, mismatch means `UNKNOWN`
+with the country named in the result.
+
+Cross-border listings also produce two states worth naming:
+
+- **`NOT DELIVERABLE`** — "This item cannot be dispatched to your
+  selected delivery location." The listing exists and may be in stock;
+  Amazon just won't send it where we asked.
+- **`NO OFFER`** — no featured offer at all, only "See All Buying
+  Options".
+
+Both are real answers, not scrape failures.
 
 ## Markets
 
