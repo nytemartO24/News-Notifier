@@ -79,6 +79,7 @@ ENGLISH_OUT_OF_STOCK_SIGNALS = [
 _MARKETPLACES = {
     "se": {
         "domain": "amazon.se",
+        "country": "Sweden",
         "locale": "en-SE",
         "native_months": {
             "januari": 1, "februari": 2, "mars": 3, "april": 4, "maj": 5, "juni": 6,
@@ -93,6 +94,7 @@ _MARKETPLACES = {
     },
     "de": {
         "domain": "amazon.de",
+        "country": "Germany",
         "locale": "en-DE",
         "native_months": {
             "januar": 1, "februar": 2, "märz": 3, "april": 4, "mai": 5, "juni": 6,
@@ -109,6 +111,7 @@ _MARKETPLACES = {
     },
     "fr": {
         "domain": "amazon.fr",
+        "country": "France",
         "locale": "en-FR",
         "native_months": {
             "janvier": 1, "février": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
@@ -125,6 +128,7 @@ _MARKETPLACES = {
     },
     "es": {
         "domain": "amazon.es",
+        "country": "Spain",
         "locale": "en-ES",
         "native_months": {
             "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -142,6 +146,7 @@ _MARKETPLACES = {
     },
     "nl": {
         "domain": "amazon.nl",
+        "country": "Netherlands",
         "locale": "en-NL",
         "native_months": {
             "januari": 1, "februari": 2, "maart": 3, "april": 4, "mei": 5, "juni": 6,
@@ -159,6 +164,7 @@ _MARKETPLACES = {
     "be": {
         # Amazon Belgium's actual domain, not amazon.be.
         "domain": "amazon.com.be",
+        "country": "Belgium",
         "locale": "en-BE",
         # Belgium's site is bilingual, so both Dutch and French month
         # names are in play if the English override ever fails there.
@@ -180,6 +186,7 @@ _MARKETPLACES = {
     },
     "it": {
         "domain": "amazon.it",
+        "country": "Italy",
         "locale": "en-IT",
         "native_months": {
             "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
@@ -196,6 +203,7 @@ _MARKETPLACES = {
     },
     "pl": {
         "domain": "amazon.pl",
+        "country": "Poland",
         "locale": "en-PL",
         # Polish dates decline the month into the genitive — a date is
         # written "12 sierpnia", never "12 sierpień". The nominative
