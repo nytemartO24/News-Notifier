@@ -119,6 +119,17 @@ delivery block hasn't rendered" into a confident wrong `NO DATE YET`); and
 the EU cookie-consent banner (`#sp-cc-accept`) is dismissed, which
 production never had to handle because its VPS browser profile is warm.
 
+**Do NOT treat a low hit rate as a bug.** The whitelist is deliberately
+rare, frequently-out-of-stock ASINs, so `NO DATE YET` / `OUT OF STOCK` /
+`NOT DELIVERABLE` / `NO OFFER` are the *expected* answers most of the
+time, and a market returning 0 real dates is usually reporting reality
+rather than failing. The metric that matters is not "how many dates did
+we get" but "when an item did become orderable, did we notice and
+alert". `UNKNOWN` is the only outcome that means something went wrong —
+that's exactly why the states above were given their own names instead
+of being flattened into it. (Confirmed by the user, 2026-08-04, after
+several rounds of me wrongly reading hit rate as a quality signal.)
+
 **Verified live** (run 30803204143, 2026-08-03, 8 markets x 8 ASINs,
 `--debug`). The language fix is confirmed correct by direct evidence:
 `<html lang>` came back **`en-gb` on every market except `pl`** (which
