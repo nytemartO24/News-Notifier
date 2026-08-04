@@ -563,6 +563,25 @@ def is_amazon_seller(seller_text: str):
     return "amazon" in seller_text.lower()
 
 
+# "International Shopping Transition Alert We are showing you items that
+# dispatch to Sweden . To see items that dispatch to a different country,
+# change your delivery address." — anchored on "showing you" so it can't
+# match the second clause's "dispatch to a different country".
+INTERNATIONAL_DESTINATION_PATTERN = re.compile(
+    r"showing you items that dispatch to\s+([^.]+?)\s*\.", re.IGNORECASE
+)
+
+
+def international_shopping_destination(page_text_lower: str) -> str:
+    """Which country an international-shopping page is dispatching to."""
+    match = INTERNATIONAL_DESTINATION_PATTERN.search(page_text_lower)
+    if not match:
+        return ""
+    # Title-cased because the haystack is lowercased for matching, and
+    # this string ends up in logs and in stored state.
+    return " ".join(match.group(1).split()).title()
+
+
 def read_delivery_location(page) -> str:
     """Whatever Amazon's 'Deliver to ...' widget currently says."""
     try:
@@ -662,11 +681,10 @@ def set_delivery_location(page, market: str, config: dict) -> str:
     so a market whose modal differs is diagnosable from the log alone.
     """
     domestic = config["country"].strip().lower() == DELIVERY_COUNTRY.strip().lower()
-    target = DELIVERY_POSTCODE if domestic else DELIVERY_COUNTRY
     logger.info(
-        f"[{market}] pinning delivery location to {target!r} "
-        f"({'domestic postcode' if domestic else 'international country'}); "
-        f"currently reads {read_delivery_location(page)!r}"
+        f"[{market}] pinning delivery location to {DELIVERY_COUNTRY!r}"
+        + (f" (postcode {DELIVERY_POSTCODE} as fallback)" if domestic else "")
+        + f"; currently reads {read_delivery_location(page)!r}"
     )
 
     try:
@@ -682,7 +700,19 @@ def set_delivery_location(page, market: str, config: dict) -> str:
 
         page.wait_for_timeout(1500)
 
-        if domestic:
+        # Country first, on EVERY market including the domestic one.
+        # Expressing the destination as a country is the only form every
+        # modal supports, and it keeps all markets answering the same
+        # question. It's also what .se needs: its modal never rendered
+        # #GLUXZipUpdateInput at all (8s timeout on a real run), so the
+        # domestic-postcode path simply didn't work there.
+        if not select_country(page, market):
+            if not domestic:
+                return read_delivery_location(page)
+            # Domestic fallback: a modal with no usable country picker
+            # can still take a postcode, and postcode-level estimates
+            # are more precise than country-level ones.
+            logger.info(f"[{market}]   no country selection; falling back to postcode {DELIVERY_POSTCODE}")
             zip_input = page.locator("#GLUXZipUpdateInput")
             zip_input.wait_for(timeout=8000)
             zip_input.fill(DELIVERY_POSTCODE)
@@ -691,8 +721,6 @@ def set_delivery_location(page, market: str, config: dict) -> str:
             apply_button = page.locator("#GLUXZipUpdate input.a-button-input")
             (apply_button if apply_button.count() else page.locator("#GLUXZipUpdate")).first.click(timeout=5000)
             logger.info(f"[{market}]   submitted postcode {DELIVERY_POSTCODE}")
-        elif not select_country(page, market):
-            return read_delivery_location(page)
 
         # Applying either way swaps in a success panel whose "Continue"
         # button (#GLUXConfirmClose) starts hidden inside
@@ -836,20 +864,29 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
     # aren't comparable to a local one's.
     page_text_lower = soup.get_text(" ", strip=True).lower()
     if "international shopping transition alert" in page_text_lower:
-        logger.warning(
-            f"[{market}] {asin}: page served in INTERNATIONAL SHOPPING mode — Amazon geolocated "
-            f"this run outside {config['domain']}'s country, so any date here is an "
-            f"international-shipping estimate to the runner's location, not the local one. "
-            f"Not trusting it. (Expected on GitHub Actions' US runners; should not happen "
-            f"from an EU host.)"
-        )
-        if not DEBUG:
-            emit_diagnostics(logger.warning)
-        return {
-            "date": "UNKNOWN — international-shopping page, date not representative",
-            "seller_text": "",
-            "is_amazon_seller": None,
-        }
+        shipping_to = international_shopping_destination(page_text_lower)
+        if shipping_to and shipping_to.lower() == DELIVERY_COUNTRY.lower():
+            # Intended. We asked amazon.de to deliver to Sweden, so of
+            # course it's showing us the cross-border experience — that
+            # IS the question ("can I get this from .de, to me, and
+            # when?"). Read the page normally.
+            logger.info(
+                f"[{market}]   international-shopping page dispatching to {shipping_to} "
+                f"— that's the requested destination, reading it normally"
+            )
+        else:
+            logger.warning(
+                f"[{market}] {asin}: page is dispatching to {shipping_to or 'an unknown country'}, "
+                f"but we asked for {DELIVERY_COUNTRY} — so any date here describes the wrong "
+                f"destination. Not trusting it."
+            )
+            if not DEBUG:
+                emit_diagnostics(logger.warning)
+            return {
+                "date": f"UNKNOWN — page dispatches to {shipping_to or 'an unknown country'}, not {DELIVERY_COUNTRY}",
+                "seller_text": "",
+                "is_amazon_seller": None,
+            }
 
     seller_text = fetch_seller_info(soup)
     amazon_seller = is_amazon_seller(seller_text)
@@ -920,6 +957,17 @@ def fetch_delivery_date(page, url: str, asin: str, market: str, config: dict, da
             f"[{market}]   checking signal phrases against availability region "
             f"({len(signal_text)} chars): {_clip(signal_text, 240)!r}"
         )
+        # Checked before the generic signals because it's the most
+        # specific and the most actionable: the listing exists and may
+        # well be in stock, Amazon just won't send it to where we asked.
+        # Seen live on .de with the destination pinned to Sweden. Worth
+        # its own outcome rather than being flattened into "no date" —
+        # "they won't ship it to me" and "they haven't said when" are
+        # different answers to the question being asked.
+        if "cannot be dispatched to your selected delivery location" in signal_text:
+            logger.info(f"[{market}]   item cannot be dispatched to {DELIVERY_COUNTRY}")
+            return result(f"NOT DELIVERABLE (this market won't dispatch it to {DELIVERY_COUNTRY})")
+
         for signal in config["out_of_stock_signals"]:
             if signal in signal_text:
                 logger.info(f"[{market}]   matched out-of-stock signal: {signal!r}")
@@ -998,7 +1046,8 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
     # Per-market outcome tally. The single number worth watching across
     # runs is "real date" — that's the hit rate the pilot is being
     # judged on, and it's tedious to count by hand from the log.
-    outcomes = {"real date": 0, "NO DATE YET": 0, "OUT OF STOCK": 0, "NO OFFER": 0, "UNKNOWN": 0, "ERROR": 0}
+    outcomes = {"real date": 0, "NO DATE YET": 0, "OUT OF STOCK": 0, "NO OFFER": 0,
+                "NOT DELIVERABLE": 0, "UNKNOWN": 0, "ERROR": 0}
     # ASINs this pass actually got a fresh answer for, so the summary
     # can distinguish them from carried-over state (see below).
     refreshed: set[str] = set()
@@ -1118,6 +1167,8 @@ def check_market(market: str, asins: list[str], send_discord: bool) -> dict:
                 outcomes["NO DATE YET"] += 1
             elif current_date.startswith("NO OFFER"):
                 outcomes["NO OFFER"] += 1
+            elif current_date.startswith("NOT DELIVERABLE"):
+                outcomes["NOT DELIVERABLE"] += 1
             else:
                 outcomes["real date"] += 1
 
