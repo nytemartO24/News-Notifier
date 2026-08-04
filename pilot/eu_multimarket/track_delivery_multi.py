@@ -574,16 +574,80 @@ def read_delivery_location(page) -> str:
         return ""
 
 
+def select_country(page, market: str) -> bool:
+    """Pick DELIVERY_COUNTRY in the glow modal's country picker.
+
+    Confirmed against real amazon.de markup (dump_glow_dom.py): the
+    picker is a **native `<select id="GLUXCountryList">` with 242
+    options**, styled by Amazon's a-dropdown. The visible thing you'd
+    click, `#GLUXCountryListDropdown`, is a `<span>`, and the pretty
+    option list it opens is a *separate* `<ul role="listbox">` of
+    `li.a-dropdown-item > a` that doesn't exist until it's opened — and
+    is not a descendant of #GLUXCountryList. An earlier version looked
+    for "#GLUXCountryList li a", which therefore matched nothing on
+    every market, every time.
+
+    Driving the native <select> is both simpler and sturdier than
+    clicking through the popover: Amazon binds its declarative handler
+    to the select's change event, so setting it is what actually applies
+    the choice. The popover route is kept as a fallback in case some
+    market renders the picker differently.
+    """
+    select = page.locator("#GLUXCountryList")
+    if select.count():
+        tag = select.first.evaluate("el => el.tagName.toLowerCase()")
+        if tag == "select":
+            labels = select.first.evaluate(
+                "el => Array.from(el.options).map(o => o.text.trim())"
+            )
+            logger.info(f"[{market}]   country <select> offers {len(labels)} option(s)")
+            if DELIVERY_COUNTRY not in labels:
+                logger.warning(
+                    f"[{market}]   {DELIVERY_COUNTRY!r} is not in this market's country list — "
+                    f"it may not ship there. First 12: {labels[:12]}"
+                )
+                return False
+            # Exact label match, never substring: "United States" must
+            # not select "United States Minor Outlying Islands".
+            select.first.select_option(label=DELIVERY_COUNTRY, timeout=5000)
+            logger.info(f"[{market}]   selected {DELIVERY_COUNTRY!r} in the native <select>")
+            return True
+        logger.info(f"[{market}]   #GLUXCountryList is a <{tag}>, not a <select> — trying the popover")
+
+    # Fallback: open the styled dropdown and click the rendered list.
+    dropdown = page.locator("#GLUXCountryListDropdown")
+    if dropdown.count() == 0:
+        logger.warning(f"[{market}]   no country picker in this modal at all")
+        return False
+    dropdown.first.click(timeout=5000)
+    page.wait_for_timeout(1000)
+
+    options = page.locator("[role='listbox'] li.a-dropdown-item a, .a-dropdown-item a")
+    labels = [" ".join(options.nth(i).inner_text().split()) for i in range(options.count())]
+    logger.info(f"[{market}]   popover list offers {len(labels)} option(s)")
+    if DELIVERY_COUNTRY not in labels:
+        logger.warning(
+            f"[{market}]   {DELIVERY_COUNTRY!r} not in the popover list. First 12: {labels[:12]}"
+        )
+        return False
+    options.nth(labels.index(DELIVERY_COUNTRY)).click(timeout=5000)
+    logger.info(f"[{market}]   selected {DELIVERY_COUNTRY!r} via the popover list")
+    return True
+
+
 def set_delivery_location(page, market: str, config: dict) -> str:
     """Pin the delivery destination to DELIVERY_COUNTRY/DELIVERY_POSTCODE.
 
     Two different modal shapes, depending on whether the destination is
     the marketplace's own country:
 
-      * domestic  -> a postcode field (#GLUXZipUpdateInput) + Apply
-      * elsewhere -> a country dropdown (#GLUXCountryList), no postcode,
-                     because Amazon only quotes country-level estimates
-                     for international delivery
+      * domestic  -> a postcode field (#GLUXZipUpdateInput) + Apply.
+                     Only valid domestically: the field is validated
+                     against the marketplace's own country ("Please
+                     enter a five-digit German postcode" on .de) and
+                     carries that country's maxlength.
+      * elsewhere -> the country picker, no postcode, because Amazon
+                     only quotes country-level estimates across borders
 
     Called once per market, after warm-up: the choice is stored in the
     session cookies, so every product page in that context inherits it.
@@ -591,9 +655,11 @@ def set_delivery_location(page, market: str, config: dict) -> str:
     Never raises. A failure here doesn't invalidate the run, it just
     means the dates describe Amazon's guessed destination instead of the
     requested one — so it returns whatever the widget ends up saying and
-    lets the caller log the discrepancy loudly. UNVERIFIED against live
-    Amazon (this sandbox can't reach it); every step logs what it found
-    so a real run can be diagnosed from the log.
+    lets the caller log the discrepancy loudly.
+
+    Selectors are taken from a real amazon.de modal captured with
+    dump_glow_dom.py, not guessed. Every step still logs what it found,
+    so a market whose modal differs is diagnosable from the log alone.
     """
     domestic = config["country"].strip().lower() == DELIVERY_COUNTRY.strip().lower()
     target = DELIVERY_POSTCODE if domestic else DELIVERY_COUNTRY
@@ -620,33 +686,28 @@ def set_delivery_location(page, market: str, config: dict) -> str:
             zip_input = page.locator("#GLUXZipUpdateInput")
             zip_input.wait_for(timeout=8000)
             zip_input.fill(DELIVERY_POSTCODE)
-            page.locator("#GLUXZipUpdate").first.click(timeout=5000)
+            # #GLUXZipUpdate is a <span> wrapping the real
+            # <input type="submit">; click the input directly.
+            apply_button = page.locator("#GLUXZipUpdate input.a-button-input")
+            (apply_button if apply_button.count() else page.locator("#GLUXZipUpdate")).first.click(timeout=5000)
             logger.info(f"[{market}]   submitted postcode {DELIVERY_POSTCODE}")
-        else:
-            dropdown = page.locator("#GLUXCountryListDropdown")
-            dropdown.wait_for(timeout=8000)
-            dropdown.click(timeout=5000)
-            page.wait_for_timeout(800)
+        elif not select_country(page, market):
+            return read_delivery_location(page)
 
-            # Match the country name exactly rather than by substring —
-            # "Ireland" is a substring of nothing here, but e.g. a
-            # careless match could pick "United States Minor Outlying
-            # Islands" for "United States".
-            options = page.locator("#GLUXCountryList li a")
-            labels = [" ".join(options.nth(i).inner_text().split()) for i in range(options.count())]
-            logger.info(f"[{market}]   country list offers {len(labels)} option(s)")
-            if DELIVERY_COUNTRY not in labels:
-                logger.warning(
-                    f"[{market}]   {DELIVERY_COUNTRY!r} is not in this market's country list "
-                    f"— it may not ship there. Options: {labels}"
-                )
-                return read_delivery_location(page)
-            options.nth(labels.index(DELIVERY_COUNTRY)).click(timeout=5000)
-            page.wait_for_timeout(800)
-            done = page.locator("[name='glowDoneButton']")
-            if done.count():
-                done.first.click(timeout=5000)
-            logger.info(f"[{market}]   selected country {DELIVERY_COUNTRY}")
+        # Applying either way swaps in a success panel whose "Continue"
+        # button (#GLUXConfirmClose) starts hidden inside
+        # #GLUXHiddenSuccessDialog — so it becoming visible is itself
+        # confirmation that Amazon accepted the change, not just that we
+        # clicked something. Fall back to the modal's plain "Done".
+        page.wait_for_timeout(1500)
+        for selector in ("#GLUXConfirmClose", "[name='glowDoneButton']"):
+            button = page.locator(selector)
+            if button.count() and button.first.is_visible():
+                button.first.click(timeout=5000)
+                logger.info(f"[{market}]   confirmed via {selector!r}")
+                break
+        else:
+            logger.info(f"[{market}]   no confirm/done button became visible")
 
         # The change is applied server-side against the session; reload
         # so the widget (and everything downstream) reflects it.
