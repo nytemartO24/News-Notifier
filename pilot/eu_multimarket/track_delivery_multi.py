@@ -49,6 +49,8 @@ Env vars:
     DELIVERY_COUNTRY   destination country (default Sweden)
     DELIVERY_POSTCODE  destination postcode, used on the domestic market
                        only (default 37116)
+    MIN_IMPROVEMENT_DAYS  how many days earlier a date must move before
+                       it's worth a Discord ping (default 7)
     DEBUG              "true" for a page snapshot on every product
 """
 
@@ -131,6 +133,14 @@ AVAILABILITY_SELECTORS = [
 # (a stray "2019" in marketing copy, a mis-anchored day number), so it
 # is rejected rather than stored and alerted on.
 MAX_DELIVERY_HORIZON_DAYS = 400
+
+# How much earlier a date has to move before it's worth a Discord ping.
+# Amazon nudges its estimates by a day constantly — a date flickering
+# between 22 and 23 February is noise, not news. Measured against the
+# last date we alerted about rather than the last one we saw, so small
+# moves accumulate rather than being individually discarded; see
+# assess_change().
+MIN_IMPROVEMENT_DAYS = int(os.environ.get("MIN_IMPROVEMENT_DAYS", "7"))
 
 # ---------------------------------------------------------------------------
 # Diagnostics
@@ -881,22 +891,23 @@ def check_market(market: str, asins: list[str]) -> tuple[dict, dict]:
             # one ASIN improving on two markets is one message rather
             # than two. Record what the comparison will need.
             previous_date = state.get(asin, {}).get("date")
-            old_parsed = parse_date_for_sorting(previous_date or "", config["months"])
             new_parsed = parse_date_for_sorting(current_date, config["months"])
+            baseline_date, improved = assess_change(state.get(asin, {}), current_date, config, market, asin)
             findings[asin] = {
                 "market": market,
                 "flag": config["flag"],
                 "domain": config["domain"],
                 "name": name,
-                "previous": previous_date,
+                # Show the delta against the baseline the decision was
+                # actually made from, not against last run's value —
+                # otherwise a suppressed drift would render as
+                # "22 Feb → 21 Feb" on the run that finally crosses the
+                # threshold, understating the real move.
+                "previous": baseline_date or previous_date,
                 "current": current_date,
                 "price": result["price"],
                 "sort_key": new_parsed,
-                # "Improved" is any move closer, including gaining a date
-                # where there wasn't one. Both get the NEW! tag and both
-                # get their link stacked on the alert.
-                "improved": new_parsed is not None
-                and (old_parsed is None or new_parsed < old_parsed),
+                "improved": improved,
             }
 
             state[asin] = {
@@ -905,6 +916,10 @@ def check_market(market: str, asins: list[str]) -> tuple[dict, dict]:
                 "seller_text": seller_text,
                 "is_amazon_seller": is_amazon,
                 "price": result["price"],
+                # The date this ASIN/market was last ALERTED about, which
+                # is what the next run measures against. Distinct from
+                # "date" (whatever we last saw) — see assess_change().
+                "alerted_date": current_date if improved else baseline_date,
             }
 
         logger.info(f"[{market}] closing browser")
@@ -954,6 +969,63 @@ def check_market(market: str, asins: list[str]) -> tuple[dict, dict]:
         )
 
     return outcomes, findings
+
+
+def assess_change(entry: dict, current_date: str, config: dict, market: str, asin: str):
+    """Decide whether this reading is worth pinging about.
+
+    Returns (baseline_date, improved).
+
+    The comparison is against the date we last ALERTED about, not the
+    date we last saw. That distinction is the whole point. Measuring
+    against the last reading has two failure modes, and Amazon exhibits
+    both: a date that flickers between 22 and 23 February pings on every
+    single flicker, and — less obvious but worse — a date that creeps
+    earlier one day at a time never pings at all under a naive
+    threshold, because no individual step clears it. Anchoring on the
+    last alerted date makes small moves accumulate until they add up to
+    something worth telling you about, then re-anchors.
+
+    Rules:
+      no date now            -> drop the baseline, so that when a date
+                                reappears it reads as newly orderable
+      no baseline yet        -> ping (it just became orderable)
+      slipped later          -> re-anchor silently; the date we told you
+                                about is no longer on offer, so future
+                                improvements should be judged against
+                                what's actually being promised now
+      earlier by >= N days   -> ping, re-anchor
+      earlier by < N days    -> stay quiet AND keep the old baseline
+    """
+    # Absent key (not None) means state written before this field
+    # existed; seed from the last seen date so upgrading doesn't ping
+    # for every product that already had one.
+    baseline_date = entry.get("alerted_date") if "alerted_date" in entry else entry.get("date")
+
+    new_parsed = parse_date_for_sorting(current_date, config["months"])
+    baseline_parsed = parse_date_for_sorting(baseline_date or "", config["months"])
+
+    if new_parsed is None:
+        return None, False
+    if baseline_parsed is None:
+        return baseline_date, True
+    if new_parsed > baseline_parsed:
+        logger.info(
+            f"[{market}]   {asin}: date slipped later ({baseline_date!r} -> {current_date!r}), "
+            f"re-anchoring without notifying"
+        )
+        return current_date, False
+
+    days_earlier = (baseline_parsed - new_parsed).days
+    if days_earlier >= MIN_IMPROVEMENT_DAYS:
+        return baseline_date, True
+    if days_earlier:
+        logger.info(
+            f"[{market}]   {asin}: only {days_earlier} day(s) earlier than the last alerted "
+            f"{baseline_date!r} (threshold {MIN_IMPROVEMENT_DAYS}) — staying quiet, "
+            f"keeping the baseline so further moves accumulate"
+        )
+    return baseline_date, False
 
 
 def send_delivery_alerts(findings_by_market: dict, send_discord: bool) -> int:

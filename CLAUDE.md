@@ -146,6 +146,22 @@ delivery block hasn't rendered" into a confident wrong `NO DATE YET`); and
 the EU cookie-consent banner (`#sp-cc-accept`) is dismissed, which
 production never had to handle because its VPS browser profile is warm.
 
+**Alerting is thresholded, and the baseline is the last ALERTED date,
+not the last seen one** (`assess_change`, `MIN_IMPROVEMENT_DAYS`,
+default 7). Amazon flickers its estimates by a day constantly — the live
+run pinged every time a date bounced between 22 and 23 February.
+Comparing against the previous *reading* has two failure modes and
+Amazon shows both: flicker pings on every flicker, and a date creeping
+earlier one day at a time never pings at all, because no single step
+clears the threshold. Anchoring on the last alerted date makes small
+moves accumulate until they're worth reporting, then re-anchors. A date
+slipping later re-anchors silently (the promise we told you about is
+gone); losing the date entirely clears the baseline so its return reads
+as newly orderable. Newly-orderable always pings regardless of
+threshold. State entries carry `alerted_date` alongside `date`; an entry
+missing that key is seeded from `date`, so upgrading doesn't fire a
+burst for everything that already had one.
+
 **Do NOT treat a low hit rate as a bug.** The whitelist is deliberately
 rare, frequently-out-of-stock ASINs, so `NO DATE YET` / `OUT OF STOCK` /
 `NOT DELIVERABLE` / `NO OFFER` are the *expected* answers most of the
